@@ -8,6 +8,7 @@
 DerivedData/
 build/
 dist/
+Porto.xcodeproj/
 xcuserdata/
 *.xcuserstate
 *.xcscmblueprint
