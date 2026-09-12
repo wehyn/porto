@@ -3,47 +3,26 @@ import SwiftUI
 struct PortProcessRow: View {
     let row: PortProcess
     @ObservedObject var monitor: PortMonitor
-    @State private var isExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Button {
-                    isExpanded.toggle()
-                } label: {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .frame(width: 16, height: 22)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(isExpanded ? "Hide details for \(row.processName)" : "Show details for \(row.processName)")
-                .help(isExpanded ? "Hide details" : "Show details")
-
-                Text("\(row.localPort)")
-                    .font(.body.monospacedDigit())
-                    .frame(minWidth: 48, alignment: .trailing)
-                Text("·")
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(row.processName)
+                    .font(.body.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .accessibilityLabel(row.processName)
                     .help(row.processName)
-                Spacer(minLength: 4)
-                actions
+                Text("\(row.localPort)")
+                    .font(.caption2.monospacedDigit().weight(.medium))
+                    .foregroundStyle(.secondary)
             }
-            .contentShape(Rectangle())
-            .focusable()
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Port \(row.localPort), \(row.processName)")
-            .accessibilityValue(row.accessibilityValue)
-
-            if isExpanded {
-                PortProcessDetails(row: row, monitor: monitor)
-                    .padding(.leading, 22)
-                    .padding(.bottom, 5)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            actions
         }
+        .contentShape(Rectangle())
+        .focusable()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Process \(row.processName), port \(row.localPort)")
         .padding(.vertical, 2)
     }
 
@@ -82,6 +61,7 @@ struct PortProcessRow: View {
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
         .disabled(monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Stop \(row.processName)")
         .help("Send SIGTERM to process \(row.processName) (PID \(row.pid)). This can close all ports owned by the process.")
@@ -107,77 +87,5 @@ struct PortProcessRow: View {
             .foregroundStyle(.orange)
             .accessibilityLabel(failure.userMessage)
             .help(failure.helpText)
-    }
-}
-
-private struct PortProcessDetails: View {
-    let row: PortProcess
-    @ObservedObject var monitor: PortMonitor
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("\(row.transport.rawValue) · PID \(row.pid)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ForEach(Array(visibleEndpoints.enumerated()), id: \.offset) { _, endpoint in
-                Text(endpointDisplay(endpoint))
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(endpoint.rawValue)
-            }
-            if remainingEndpointCount > 0, !showAllEndpoints {
-                Text("and \(remainingEndpointCount) more")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Show all endpoints") {
-                    showAllEndpoints = true
-                }
-                .buttonStyle(.link)
-                .font(.caption)
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(detailsAccessibilityLabel)
-    }
-
-    @State private var showAllEndpoints = false
-
-    private var visibleEndpoints: ArraySlice<Endpoint> {
-        row.endpoints.prefix(showAllEndpoints ? row.endpoints.count : 5)
-    }
-
-    private var remainingEndpointCount: Int {
-        max(0, row.endpoints.count - 5)
-    }
-
-    private func endpointDisplay(_ endpoint: Endpoint) -> String {
-        if let state = endpoint.socketState {
-            return "\(endpoint.rawValue) · \(state)"
-        }
-        return endpoint.rawValue
-    }
-
-    private var detailsAccessibilityLabel: String {
-        let stateText = row.endpoints.compactMap(\.socketState).uniqued().joined(separator: ", ")
-        let endpointText = row.endpoints.map(\.rawValue).joined(separator: ", ")
-        let stateSuffix = stateText.isEmpty ? "" : ", states \(stateText)"
-        return "Protocol \(row.transport.rawValue), PID \(row.pid)\(stateSuffix), endpoints \(endpointText)"
-    }
-}
-
-private extension Array where Element: Hashable {
-    func uniqued() -> [Element] {
-        var seen: Set<Element> = []
-        return filter { seen.insert($0).inserted }
-    }
-}
-
-private extension PortProcess {
-    var accessibilityValue: String {
-        let protocolText = transport.rawValue
-        let endpointCount = endpoints.count == 1 ? "1 endpoint" : "\(endpoints.count) endpoints"
-        return "\(protocolText), \(endpointCount)"
     }
 }

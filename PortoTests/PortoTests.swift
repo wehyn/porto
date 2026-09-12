@@ -4,12 +4,18 @@ import XCTest
 @testable import Porto
 
 final class PortVisibilityPolicyTests: XCTestCase {
-    func testDeveloperPolicyHidesXserveRaidPortAndKnownInfrastructure() {
+    func testDeveloperPolicyHidesKnownInfrastructureWithoutHidingCustomPorts() {
         let policy = PortVisibilityPolicy.developerFocused
 
-        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "my-app")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "rapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "remotepairingd")))
         XCTAssertFalse(policy.includes(parsedGroup(port: 5000, processName: "ControlCenter")))
-        XCTAssertFalse(policy.includes(parsedGroup(port: 64776, processName: "crapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 64776, processName: "rapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 62096, processName: "replicatord")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 6463, processName: "Discord Helper (Renderer)")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 52369, processName: "Zen")))
+        XCTAssertTrue(policy.includes(parsedGroup(port: 3722, processName: "my-app")))
+        XCTAssertTrue(policy.includes(parsedGroup(port: 5000, processName: "my-local-app")))
     }
 
     func testDeveloperPolicyKeepsCustomPortsVisible() {
@@ -204,7 +210,7 @@ final class PortScannerTests: XCTestCase {
 
     func testDeveloperFocusedPolicyFiltersNoiseBeforeIdentityEnrichment() async {
         let output = nulFixture([
-            "p100", "ccraportd", "f1", "PUDP", "n*:3722",
+            "p100", "crapportd", "f1", "PUDP", "n*:3722",
             "p101", "cControlCenter", "f2", "PTCP", "n*:5000", "TST=LISTEN",
             "p102", "cmy-local-app", "f3", "PTCP", "n127.0.0.1:45678", "TST=LISTEN"
         ])
@@ -405,10 +411,10 @@ final class LsofRunnerTests: XCTestCase {
 
 @MainActor
 final class PortMonitorTests: XCTestCase {
-    func testOpenScansImmediatelyAndCloseResetsSections() async {
+    func testOpenScansImmediatelyAndCloseStopsRefresh() async {
         let firstSnapshot = PortSnapshot(
             listeners: [makeRow(pid: 9, port: 8080)],
-            connections: []
+            connections: [makeRow(pid: 10, port: 443, activityKind: .connection)]
         )
         let scanner = SequencedMonitorScanner(outcomes: [
             .success(snapshot: firstSnapshot, diagnostics: zeroDiagnostics),
@@ -420,11 +426,8 @@ final class PortMonitorTests: XCTestCase {
         await waitUntil { await scanner.scanCount() == 1 }
         XCTAssertTrue(monitor.hasSnapshot)
         XCTAssertEqual(monitor.listenerRows, firstSnapshot.listeners)
-        XCTAssertTrue(monitor.listenersExpanded)
-        XCTAssertFalse(monitor.connectionsExpanded)
-
-        monitor.connectionsExpanded = true
-        monitor.listenersExpanded = false
+        XCTAssertEqual(monitor.connectionRows, firstSnapshot.connections)
+        XCTAssertEqual(monitor.allRows, [firstSnapshot.connections[0], firstSnapshot.listeners[0]])
         monitor.refresh()
         await waitUntil { await scanner.scanCount() == 2 }
         XCTAssertEqual(monitor.listenerRows, firstSnapshot.listeners)
@@ -433,8 +436,48 @@ final class PortMonitorTests: XCTestCase {
 
         monitor.setPresented(false)
         XCTAssertFalse(monitor.isPopoverPresented)
-        XCTAssertTrue(monitor.listenersExpanded)
-        XCTAssertFalse(monitor.connectionsExpanded)
+    }
+
+    func testBackgroundRefreshDoesNotSetManualRefreshState() async {
+        let clock = ManualMonitorClock()
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics),
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
+
+        await waitUntil { await clock.waitingCount() == 1 }
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
+    }
+
+    func testManualRefreshStateIsSeparateFromBackgroundScan() async {
+        let scanner = BlockingMonitorScanner(snapshot: .empty)
+        let monitor = PortMonitor(scanner: scanner, terminator: NoopTerminator(), ownPID: 999)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 }
+        XCTAssertTrue(monitor.isScanning)
+        XCTAssertFalse(monitor.isManualRefreshing)
+
+        monitor.refresh()
+        XCTAssertTrue(monitor.isManualRefreshing)
+
+        await scanner.releaseFirstScan()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
     }
 
     func testSuccessfulEmptyScanReplacesThePreviousSnapshot() async {
@@ -1125,11 +1168,16 @@ private func identity(_ pid: Int32, _ seconds: UInt64) -> ProcessIdentity {
     ProcessIdentity(pid: pid, startTimeSeconds: seconds, startTimeMicroseconds: 1)
 }
 
-private func makeRow(pid: Int32, port: Int, name: String = "process") -> PortProcess {
+private func makeRow(
+    pid: Int32,
+    port: Int,
+    name: String = "process",
+    activityKind: PortActivityKind = .listener
+) -> PortProcess {
     let processIdentity = identity(pid, 1)
     return PortProcess(
         id: PortProcess.makeID(
-            activityKind: .listener,
+            activityKind: activityKind,
             transport: .tcp,
             localPort: port,
             pid: pid,
@@ -1142,7 +1190,7 @@ private func makeRow(pid: Int32, port: Int, name: String = "process") -> PortPro
         transport: .tcp,
         processName: name,
         endpoints: [Endpoint(rawValue: "*:8080", localPort: port, hasRemoteEndpoint: false, socketState: "LISTEN")],
-        activityKind: .listener
+        activityKind: activityKind
     )
 }
 

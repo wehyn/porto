@@ -46,19 +46,23 @@ open ~/Library/Developer/Xcode/DerivedData/Porto-*/Build/Products/Debug/Porto.ap
 Porto is an agent/background menu-bar app, so it has no Dock icon or main
 window. Click the `Porto` network status item to open the popover. Opening it
 starts the first scan; while it remains visible, refreshes are requested every
-2 seconds. Closing it stops recurring scans. Use the overflow menu for About
+2 seconds. These background updates are silent; the refresh button only indicates
+a user-requested refresh. Closing it stops recurring scans. Use the overflow menu for About
 Porto and Quit Porto.
 
-The default view is developer-focused: it hides the legacy Xserve RAID port
-3722 and a small set of macOS infrastructure processes, while keeping custom
-project ports visible. Visible rows retain deterministic local-port ordering.
+The default view is developer-focused: it hides known macOS infrastructure plus
+Zen and Discord helper processes by name, while keeping custom project ports
+visible.
+Listeners and active connections appear together in one list, sorted by local
+port.
 
 ## Runtime acceptance
 
 On the accepted macOS environment, verify that the menu-bar icon is present,
-listeners start expanded, connections start collapsed with a grouped-row
-count, rows disclose selectable monospaced endpoints, and scrolling remains
-native. Use a disposable current-user TCP server to exercise SIGTERM and a
+all visible activity appears in one list, rows show the process name with its
+local port beneath it and no category or per-process disclosures, and scrolling
+remains native. Use a disposable
+current-user TCP server to exercise SIGTERM and a
 SIGTERM-ignoring fixture to verify that Force Kill appears only after the grace
 period and requires confirmation. Activity Monitor should show no normal
 `lsof` child while the popover is closed and never more than one while it is

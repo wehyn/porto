@@ -10,26 +10,25 @@ struct PortPopoverView: View {
         VStack(spacing: 0) {
             header
             Divider()
+                .opacity(0.65)
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     if !monitor.hasSnapshot && monitor.isScanning {
                         scanningState
                     } else if !monitor.hasSnapshot, let error = monitor.scanError {
                         firstLoadErrorState(error)
                     } else {
-                        listenerSection
-                        connectionSection
+                        activityRows
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
             }
             .scrollIndicators(.automatic)
             footer
         }
         .frame(width: 360)
         .frame(minHeight: 180, maxHeight: 560)
-        .background(.regularMaterial)
         .confirmationDialog(
             forceKillTitle,
             isPresented: forceKillPromptBinding,
@@ -47,19 +46,20 @@ struct PortPopoverView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Text("Porto")
-                .font(.headline)
+                .font(.title3.weight(.semibold))
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
             Button(action: monitor.refresh) {
                 Image(systemName: "arrow.clockwise")
-                    .rotationEffect(.degrees(monitor.isScanning && !reduceMotion ? 360 : 0))
+                    .imageScale(.medium)
+                    .rotationEffect(.degrees(monitor.isManualRefreshing && !reduceMotion ? 360 : 0))
                     .animation(
-                        monitor.isScanning && !reduceMotion
+                        monitor.isManualRefreshing && !reduceMotion
                             ? .linear(duration: 0.9).repeatForever(autoreverses: false)
                             : .default,
-                        value: monitor.isScanning
+                        value: monitor.isManualRefreshing
                     )
             }
             .buttonStyle(.borderless)
@@ -78,37 +78,31 @@ struct PortPopoverView: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
+                    .imageScale(.medium)
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("Porto menu")
             .help("About Porto and Quit Porto")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
-    private var listenerSection: some View {
-        DisclosureGroup(isExpanded: $monitor.listenersExpanded) {
-            sectionRows(
-                rows: monitor.listenerRows,
-                emptyText: "No listeners found"
-            )
-        } label: {
-            SectionTitle(title: "Listeners")
+    @ViewBuilder
+    private var activityRows: some View {
+        if monitor.allRows.isEmpty {
+            Text("No ports found")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+                .accessibilityLabel("No ports found")
+        } else {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(monitor.allRows) { row in
+                    PortProcessRow(row: row, monitor: monitor)
+                }
+            }
         }
-        .accessibilityValue("\(monitor.listenerRows.count) grouped rows")
-    }
-
-    private var connectionSection: some View {
-        DisclosureGroup(isExpanded: $monitor.connectionsExpanded) {
-            sectionRows(
-                rows: monitor.connectionRows,
-                emptyText: "No active connections found"
-            )
-        } label: {
-            SectionTitle(title: "Connections", count: monitor.connectionRows.count)
-        }
-        .accessibilityValue("\(monitor.connectionRows.count) grouped rows")
     }
 
     private var scanningState: some View {
@@ -138,32 +132,6 @@ struct PortPopoverView: View {
     }
 
     @ViewBuilder
-    private func sectionRows(rows: [PortProcess], emptyText: String) -> some View {
-        if !monitor.hasSnapshot && monitor.isScanning {
-            HStack(spacing: 7) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Scanning…")
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 5)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Scanning")
-        } else if rows.isEmpty {
-            Text(emptyText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 4)
-        } else {
-            LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(rows) { row in
-                    PortProcessRow(row: row, monitor: monitor)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
     private var footer: some View {
         if let error = monitor.scanError, monitor.hasSnapshot {
             HStack(spacing: 6) {
@@ -181,17 +149,9 @@ struct PortPopoverView: View {
                 .accessibilityLabel("Retry port scan")
                 .help("Retry port scan")
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.bottom, 9)
             .accessibilityElement(children: .contain)
-        } else if let lastScan = monitor.lastSuccessfulScanAt {
-            Text("Updated \(lastScan, style: .relative)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-                .accessibilityLabel("Last successful scan \(lastScan.formatted(date: .abbreviated, time: .shortened))")
         }
     }
 
@@ -211,32 +171,6 @@ struct PortPopoverView: View {
             set: { presented in
                 if !presented { monitor.cancelForceKillPrompt() }
             }
-        )
-    }
-}
-
-private struct SectionTitle: View {
-    let title: String
-    let count: Int?
-
-    init(title: String, count: Int? = nil) {
-        self.title = title
-        self.count = count
-    }
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            if let count {
-                Text("(\(count))")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            count.map { "\(title), \($0) grouped rows" } ?? title
         )
     }
 }

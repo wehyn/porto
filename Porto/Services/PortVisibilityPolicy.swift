@@ -7,15 +7,21 @@ struct PortVisibilityPolicy: Sendable, Equatable {
     let hiddenProcessNames: Set<String>
 
     static let developerFocused = PortVisibilityPolicy(
-        // 3722 is used by legacy Xserve RAID discovery and is not useful in a
-        // local development port list.
-        hiddenPorts: [3722],
+        // Hide known background services and noisy user-level helpers by
+        // process name rather than hiding numeric ports that a local
+        // development server may also use.
+        hiddenPorts: [],
         hiddenProcessNames: [
             "controlcenter",
-            "crapportd",
+            "rapportd",
             "identityservicesd",
             "remotepairingd",
-            "sharingd"
+            "replicatord",
+            "sharingd",
+            "discord",
+            "discord helper",
+            "discord helper (renderer)",
+            "zen"
         ]
     )
 
