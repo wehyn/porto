@@ -60,10 +60,40 @@ struct RemotePortOutputParser: Sendable {
 }
 
 struct DockerPortBinding: Hashable, Sendable {
+    let containerID: String?
     let localPort: Int
     let transport: TransportProtocol
     let hostAddress: String?
     let containerName: String
+
+    init(
+        containerID: String?,
+        localPort: Int,
+        transport: TransportProtocol,
+        hostAddress: String?,
+        containerName: String
+    ) {
+        self.containerID = containerID
+        self.localPort = localPort
+        self.transport = transport
+        self.hostAddress = hostAddress
+        self.containerName = containerName
+    }
+
+    init(
+        localPort: Int,
+        transport: TransportProtocol,
+        hostAddress: String?,
+        containerName: String
+    ) {
+        self.init(
+            containerID: nil,
+            localPort: localPort,
+            transport: transport,
+            hostAddress: hostAddress,
+            containerName: containerName
+        )
+    }
 }
 
 struct DockerPortCatalog: Equatable, Sendable {
@@ -83,40 +113,81 @@ struct DockerPortCatalog: Equatable, Sendable {
         ).sorted()
     }
 
-    private func containerNames(for row: PortProcess) -> [String] {
-        guard row.activityKind == .listener else { return [] }
-        let localAddresses = Set(row.endpoints.compactMap(Self.localAddress(from:)))
-        return Set(
-            bindings
-                .filter {
-                    $0.localPort == row.localPort
-                        && $0.transport == row.transport
-                        && Self.bindingMatches($0, localAddresses: localAddresses)
-                }
-                .map(\.containerName)
-        ).sorted()
-    }
-
     /// Labels rows backed by a published Docker host port before visibility
-    /// filtering hides ownerless non-Docker rows.
+    /// filtering hides ownerless non-Docker rows. IPv4/IPv6, protocol, and
+    /// host-port records for the same container become one logical row.
     func applying(to snapshot: PortSnapshot) -> PortSnapshot {
-        PortSnapshot(
-            listeners: PortProcessSort.sort(snapshot.listeners.map { applying(to: $0) }),
-            connections: PortProcessSort.sort(snapshot.connections.map { applying(to: $0) })
+        var dockerGroups: [DockerRowKey: DockerRowAccumulator] = [:]
+        var retainedListeners: [PortProcess] = []
+
+        for row in snapshot.listeners {
+            guard let annotation = dockerAnnotation(for: row) else {
+                retainedListeners.append(row)
+                continue
+            }
+
+            let labeledRow = labeled(row, with: annotation)
+            guard annotation.containerIDs.count == 1,
+                  let targetID = Self.remoteTargetID(from: row.origin) else {
+                // Preserve the existing label behavior when metadata does not
+                // identify exactly one container, but do not merge by name.
+                retainedListeners.append(labeledRow)
+                continue
+            }
+
+            let key = DockerRowKey(
+                targetID: targetID,
+                activityKind: row.activityKind,
+                containerID: annotation.containerIDs[0]
+            )
+            var accumulator = dockerGroups[key, default: DockerRowAccumulator()]
+            accumulator.containerNames.formUnion(annotation.containerNames)
+            accumulator.localPorts.formUnion(row.localPorts)
+            accumulator.transports.formUnion(row.transports)
+            accumulator.endpoints.formUnion(row.endpoints)
+            if let pid = row.pid {
+                accumulator.pids.insert(pid)
+            } else {
+                accumulator.hasMissingPID = true
+            }
+            dockerGroups[key] = accumulator
+        }
+
+        let coalescedListeners = dockerGroups.map { key, accumulator in
+            makeDockerRow(key: key, accumulator: accumulator)
+        }
+        return PortSnapshot(
+            listeners: PortProcessSort.sort(retainedListeners + coalescedListeners),
+            connections: PortProcessSort.sort(snapshot.connections)
         )
     }
 
-    private func applying(to row: PortProcess) -> PortProcess {
-        let names = containerNames(for: row)
-        guard !names.isEmpty else { return row }
+    private func labeled(_ row: PortProcess, with annotation: DockerRowAnnotation) -> PortProcess {
         return PortProcess(
             id: row.id,
             origin: row.origin,
-            localPort: row.localPort,
-            transport: row.transport,
-            processName: "Docker · " + names.joined(separator: ", "),
+            localPorts: row.localPorts,
+            transports: row.transports,
+            processName: "Docker · " + annotation.containerNames.joined(separator: ", "),
             endpoints: row.endpoints,
             activityKind: row.activityKind
+        )
+    }
+
+    private func dockerAnnotation(for row: PortProcess) -> DockerRowAnnotation? {
+        guard row.activityKind == .listener,
+              Self.remoteTargetID(from: row.origin) != nil else { return nil }
+        let localAddresses = Set(row.endpoints.compactMap(Self.localAddress(from:)))
+        let matchingBindings = bindings.filter {
+            row.transports.contains($0.transport)
+                && $0.localPort == row.localPort
+                && Self.bindingMatches($0, localAddresses: localAddresses)
+        }
+        let names = Set(matchingBindings.map(\.containerName)).sorted()
+        guard !names.isEmpty else { return nil }
+        return DockerRowAnnotation(
+            containerIDs: Set(matchingBindings.compactMap(\.containerID)).sorted(),
+            containerNames: names
         )
     }
 
@@ -142,6 +213,54 @@ struct DockerPortCatalog: Equatable, Sendable {
         return canonicalAddress(host)
     }
 
+    private static func remoteTargetID(from origin: PortProcessOrigin) -> PortTargetID? {
+        guard case let .remote(targetID, _) = origin else { return nil }
+        return targetID
+    }
+
+    private func makeDockerRow(
+        key: DockerRowKey,
+        accumulator: DockerRowAccumulator
+    ) -> PortProcess {
+        let pid: Int32? = accumulator.hasMissingPID || accumulator.pids.count != 1
+            ? nil
+            : accumulator.pids.first
+        return PortProcess(
+            id: Self.dockerRowID(
+                targetID: key.targetID,
+                activityKind: key.activityKind,
+                containerID: key.containerID
+            ),
+            origin: .remote(targetID: key.targetID, pid: pid),
+            localPorts: accumulator.localPorts.sorted(),
+            transports: accumulator.transports.sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+                return lhs.rawValue < rhs.rawValue
+            },
+            processName: "Docker · " + accumulator.containerNames.sorted().joined(separator: ", "),
+            endpoints: accumulator.endpoints.sorted(by: dockerEndpointSort),
+            activityKind: key.activityKind
+        )
+    }
+
+    private static func dockerRowID(
+        targetID: PortTargetID,
+        activityKind: PortActivityKind,
+        containerID: String
+    ) -> String {
+        return [
+            "remote",
+            "target=\(stableHex(targetID.rawValue))",
+            "docker",
+            activityKind.rawValue,
+            "container=\(stableHex(containerID))"
+        ].joined(separator: "|")
+    }
+
+    private static func stableHex(_ string: String) -> String {
+        string.utf8.map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func canonicalAddress(_ address: String) -> String {
         var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if value.first == "[", value.last == "]" {
@@ -156,8 +275,34 @@ struct DockerPortCatalog: Equatable, Sendable {
     }
 }
 
+private struct DockerRowAnnotation {
+    let containerIDs: [String]
+    let containerNames: [String]
+}
+
+private struct DockerRowKey: Hashable {
+    let targetID: PortTargetID
+    let activityKind: PortActivityKind
+    let containerID: String
+}
+
+private struct DockerRowAccumulator {
+    var containerNames: Set<String> = []
+    var localPorts: Set<Int> = []
+    var transports: Set<TransportProtocol> = []
+    var endpoints: Set<Endpoint> = []
+    var pids: Set<Int32> = []
+    var hasMissingPID = false
+}
+
+private func dockerEndpointSort(_ lhs: Endpoint, _ rhs: Endpoint) -> Bool {
+    if lhs.sortKey != rhs.sortKey { return lhs.sortKey < rhs.sortKey }
+    return lhs.rawValue < rhs.rawValue
+}
+
 /// Parses `docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}"` output.
 struct DockerPortParser: Sendable {
+    private static let maximumContainerIDLength = 128
     private static let maximumContainerNameLength = 128
     private static let maximumPortRangeLength = 4_096
 
@@ -166,13 +311,20 @@ struct DockerPortParser: Sendable {
         for rawLine in output.split(whereSeparator: \.isNewline) {
             let fields = rawLine.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
             guard fields.count == 3, let name = sanitizeName(String(fields[1])) else { continue }
-            parsePortMappings(String(fields[2]), containerName: name, into: &bindings)
+            let containerID = sanitizeContainerID(String(fields[0]))
+            parsePortMappings(
+                String(fields[2]),
+                containerID: containerID,
+                containerName: name,
+                into: &bindings
+            )
         }
         return DockerPortCatalog(bindings: bindings)
     }
 
     private func parsePortMappings(
         _ output: String,
+        containerID: String?,
         containerName: String,
         into bindings: inout Set<DockerPortBinding>
     ) {
@@ -206,6 +358,7 @@ struct DockerPortParser: Sendable {
             guard let portRange = parsePortRange(String(hostPortText)) else { continue }
             for port in portRange {
                 bindings.insert(DockerPortBinding(
+                    containerID: containerID,
                     localPort: port,
                     transport: transport,
                     hostAddress: hostAddress,
@@ -213,6 +366,16 @@ struct DockerPortParser: Sendable {
                 ))
             }
         }
+    }
+
+    private func sanitizeContainerID(_ id: String) -> String? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.count <= Self.maximumContainerIDLength,
+              !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return nil
+        }
+        return trimmed
     }
 
     private func parsePortRange(_ text: String) -> ClosedRange<Int>? {

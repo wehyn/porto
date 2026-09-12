@@ -69,6 +69,155 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.validRecords, 4)
     }
 
+    func testDockerIPv4IPv6AndTCPUDPListenersCoalesceIntoOneLogicalRow() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:53 0.0.0.0:* ino:1 sk:one
+        tcp LISTEN 0 128 [::]:53 [::]:* ino:2 sk:two
+        tcp LISTEN 0 128 [::]:53 [::]:* ino:2 sk:duplicate
+        udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:* ino:3 sk:three
+        udp UNCONN 0 0 [::]:53 [::]:* ino:4 sk:four
+        __PORTO_DOCKER__
+        2b4f94051c6e\tpihole\t0.0.0.0:53->53/tcp, [::]:53->53/tcp, 0.0.0.0:53->53/udp, [::]:53->53/udp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 1)
+        let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
+        XCTAssertEqual(row.processName, "Docker · pihole")
+        XCTAssertEqual(row.localPort, 53)
+        XCTAssertEqual(row.localPorts, [53])
+        XCTAssertEqual(row.transports, [.tcp, .udp])
+        XCTAssertEqual(row.endpoints.count, 4)
+        XCTAssertEqual(Set(row.endpoints.compactMap(\.socketState)), ["LISTEN", "UNCONN"])
+        XCTAssertEqual(snapshot.diagnostics.validRecords, 5)
+    }
+
+    func testDockerSameContainerPortsCoalesceIntoOneRowWithOrderedPorts() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:53 0.0.0.0:* ino:1 sk:tcp53-v4
+        tcp LISTEN 0 128 [::]:53 [::]:* ino:2 sk:tcp53-v6
+        udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:* ino:3 sk:udp53-v4
+        udp UNCONN 0 0 [::]:53 [::]:* ino:4 sk:udp53-v6
+        tcp LISTEN 0 128 0.0.0.0:80 0.0.0.0:* ino:5 sk:tcp80-v4
+        tcp LISTEN 0 128 [::]:80 [::]:* ino:6 sk:tcp80-v6
+        __PORTO_DOCKER__
+        2b4f94051c6e\tpihole\t0.0.0.0:53->53/tcp, [::]:53->53/tcp, 0.0.0.0:53->53/udp, [::]:53->53/udp, 0.0.0.0:80->80/tcp, [::]:80->80/tcp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 1)
+        let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
+        XCTAssertEqual(row.processName, "Docker · pihole")
+        XCTAssertEqual(row.localPort, 53)
+        XCTAssertEqual(row.localPorts, [53, 80])
+        XCTAssertEqual(row.transports, [.tcp, .udp])
+        XCTAssertEqual(row.endpoints.count, 6)
+        XCTAssertEqual(snapshot.diagnostics.validRecords, 6)
+    }
+
+    func testScreenshotDockerPortsCollapseAcrossIPv4AndIPv6() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:80 0.0.0.0:* ino:80-v4 sk:80-v4
+        tcp LISTEN 0 128 [::]:80 [::]:* ino:80-v6 sk:80-v6
+        tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1455-v4 sk:1455-v4
+        tcp LISTEN 0 128 [::]:1455 [::]:* ino:1455-v6 sk:1455-v6
+        tcp LISTEN 0 128 0.0.0.0:2283 0.0.0.0:* ino:2283-v4 sk:2283-v4
+        tcp LISTEN 0 128 [::]:2283 [::]:* ino:2283-v6 sk:2283-v6
+        tcp LISTEN 0 128 0.0.0.0:6565 0.0.0.0:* ino:6565-v4 sk:6565-v4
+        tcp LISTEN 0 128 [::]:6565 [::]:* ino:6565-v6 sk:6565-v6
+        __PORTO_DOCKER__
+        pihole-id\tpihole\t0.0.0.0:80->80/tcp, [::]:80->80/tcp
+        omniroute-id\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
+        immich-id\timmich_server\t0.0.0.0:2283->2283/tcp, [::]:2283->2283/tcp
+        filebrowser-id\tfilebrowser-filebrowser-1\t0.0.0.0:6565->80/tcp, [::]:6565->80/tcp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [80, 1455, 2283, 6565])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), [
+            "Docker · pihole",
+            "Docker · omniroute",
+            "Docker · immich_server",
+            "Docker · filebrowser-filebrowser-1"
+        ])
+        XCTAssertTrue(snapshot.snapshot.listeners.allSatisfy { $0.endpoints.count == 2 && $0.transports == [.tcp] })
+        XCTAssertEqual(snapshot.diagnostics.validRecords, 8)
+    }
+
+    func testDockerLogicalRowIDIsStableAcrossAddressFamiliesAndInputOrder() async throws {
+        let bothFamilies = """
+        tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
+        tcp LISTEN 0 128 [::]:1455 [::]:* ino:2 sk:two
+        __PORTO_DOCKER__
+        container-a\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
+        """
+        let reversedFamilies = """
+        tcp LISTEN 0 128 [::]:1455 [::]:* ino:2 sk:two
+        tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
+        __PORTO_DOCKER__
+        container-a\tomniroute\t[::]:1455->1455/tcp, 0.0.0.0:1455->1455/tcp
+        """
+        let singleFamily = """
+        tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
+        __PORTO_DOCKER__
+        container-a\tomniroute\t0.0.0.0:1455->1455/tcp
+        """
+        let twoPorts = """
+        tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
+        tcp LISTEN 0 128 0.0.0.0:2283 0.0.0.0:* ino:3 sk:three
+        __PORTO_DOCKER__
+        container-a\tomniroute\t0.0.0.0:1455->1455/tcp, 0.0.0.0:2283->2283/tcp
+        """
+
+        let firstSnapshot = try await scan(bothFamilies)
+        let secondSnapshot = try await scan(reversedFamilies)
+        let singleFamilySnapshot = try await scan(singleFamily)
+        let twoPortsSnapshot = try await scan(twoPorts)
+        let first = try XCTUnwrap(firstSnapshot.snapshot.listeners.first)
+        let second = try XCTUnwrap(secondSnapshot.snapshot.listeners.first)
+        let singleFamilyRow = try XCTUnwrap(singleFamilySnapshot.snapshot.listeners.first)
+        let twoPortsRow = try XCTUnwrap(twoPortsSnapshot.snapshot.listeners.first)
+
+        XCTAssertEqual(first.id, second.id)
+        XCTAssertEqual(first.id, singleFamilyRow.id)
+        XCTAssertEqual(first.id, twoPortsRow.id)
+        XCTAssertEqual(twoPortsRow.localPorts, [1455, 2283])
+        XCTAssertEqual(first, second)
+    }
+
+    func testDifferentDockerContainersOnTheSamePortRemainSeparate() async throws {
+        let output = """
+        tcp LISTEN 0 128 127.0.0.1:8080 127.0.0.1:* ino:1 sk:one
+        tcp LISTEN 0 128 192.0.2.10:8080 192.0.2.10:* ino:2 sk:two
+        __PORTO_DOCKER__
+        container-a\tsame-name\t127.0.0.1:8080->8080/tcp
+        container-b\tsame-name\t192.0.2.10:8080->8080/tcp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 2)
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · same-name", "Docker · same-name"])
+        XCTAssertNotEqual(snapshot.snapshot.listeners[0].id, snapshot.snapshot.listeners[1].id)
+    }
+
+    func testRowsWithoutUsableDockerIDsAreLabeledButNotCoalesced() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:1 sk:one
+        tcp LISTEN 0 128 [::]:8080 [::]:* ino:2 sk:two
+        __PORTO_DOCKER__
+        \tweb\t0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 2)
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · web", "Docker · web"])
+    }
+
     func testDockerLabelsOnlyMatchingListenerAddressAndNeverConnections() async throws {
         let output = """
         tcp LISTEN 0 128 127.0.0.1:8080 127.0.0.1:* ino:1
@@ -122,6 +271,23 @@ final class RemotePortScannerTests: XCTestCase {
         guard case .failure = outcome else { return XCTFail("expected failure") }
         let aliases = await runner.aliases()
         XCTAssertTrue(aliases.isEmpty)
+    }
+
+    private func scan(_ output: String, sessionGeneration: UInt64 = 1) async throws -> TargetedPortSnapshot {
+        let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
+        let scanner = RemotePortScanner(host: host, runner: runner)
+        let request = PortScanRequest(
+            targetID: PortTarget.ssh(host).id,
+            sessionGeneration: sessionGeneration,
+            scanGeneration: 1,
+            trigger: .manual
+        )
+
+        let outcome = await scanner.scan(request)
+        guard case let .success(snapshot) = outcome else {
+            throw NSError(domain: "RemotePortScannerTests", code: 1)
+        }
+        return snapshot
     }
 
     private func execution(stdout: Data = Data(), stderr: Data = Data(), status: Int32?) -> SSHCommandExecutionResult {

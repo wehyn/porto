@@ -43,8 +43,11 @@ enum PortProcessOrigin: Hashable, Sendable, Codable {
 struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let id: String
     let origin: PortProcessOrigin
+    /// The lowest port, retained for existing sorting and single-port callers.
     let localPort: Int
-    let transport: TransportProtocol
+    /// Ordered unique ports; local and non-Docker rows contain one value.
+    let localPorts: [Int]
+    let transports: [TransportProtocol]
     let processName: String
     let endpoints: [Endpoint]
     let activityKind: PortActivityKind
@@ -58,10 +61,85 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         endpoints: [Endpoint],
         activityKind: PortActivityKind
     ) {
+        self.init(
+            id: id,
+            origin: origin,
+            localPorts: [localPort],
+            transports: [transport],
+            processName: processName,
+            endpoints: endpoints,
+            activityKind: activityKind
+        )
+    }
+
+    init(
+        id: String,
+        origin: PortProcessOrigin,
+        localPort: Int,
+        transports: [TransportProtocol],
+        processName: String,
+        endpoints: [Endpoint],
+        activityKind: PortActivityKind
+    ) {
         self.id = id
         self.origin = origin
         self.localPort = localPort
-        self.transport = transport
+        self.localPorts = [localPort]
+        let uniqueTransports = Set(transports)
+        self.transports = uniqueTransports.isEmpty
+            ? [.tcp]
+            : uniqueTransports.sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+                return lhs.rawValue < rhs.rawValue
+            }
+        self.processName = processName
+        self.endpoints = endpoints
+        self.activityKind = activityKind
+    }
+
+    init(
+        id: String,
+        origin: PortProcessOrigin,
+        localPorts: [Int],
+        transport: TransportProtocol,
+        processName: String,
+        endpoints: [Endpoint],
+        activityKind: PortActivityKind
+    ) {
+        self.init(
+            id: id,
+            origin: origin,
+            localPorts: localPorts,
+            transports: [transport],
+            processName: processName,
+            endpoints: endpoints,
+            activityKind: activityKind
+        )
+    }
+
+    init(
+        id: String,
+        origin: PortProcessOrigin,
+        localPorts: [Int],
+        transports: [TransportProtocol],
+        processName: String,
+        endpoints: [Endpoint],
+        activityKind: PortActivityKind
+    ) {
+        let uniqueLocalPorts = Set(localPorts).sorted()
+        precondition(!uniqueLocalPorts.isEmpty, "PortProcess requires at least one local port")
+
+        self.id = id
+        self.origin = origin
+        self.localPort = uniqueLocalPorts[0]
+        self.localPorts = uniqueLocalPorts
+        let uniqueTransports = Set(transports)
+        self.transports = uniqueTransports.isEmpty
+            ? [.tcp]
+            : uniqueTransports.sorted { lhs, rhs in
+                if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
+                return lhs.rawValue < rhs.rawValue
+            }
         self.processName = processName
         self.endpoints = endpoints
         self.activityKind = activityKind
@@ -87,6 +165,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
             activityKind: activityKind
         )
     }
+
+    /// The first transport preserves the existing single-transport call sites.
+    /// Aggregate remote Docker rows expose every protocol through `transports`.
+    var transport: TransportProtocol { transports[0] }
 
     var localIdentity: ProcessIdentity? {
         if case let .local(identity) = origin { return identity }
