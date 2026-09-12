@@ -411,10 +411,10 @@ final class LsofRunnerTests: XCTestCase {
 
 @MainActor
 final class PortMonitorTests: XCTestCase {
-    func testOpenScansImmediatelyAndCloseResetsSections() async {
+    func testOpenScansImmediatelyAndCloseStopsRefresh() async {
         let firstSnapshot = PortSnapshot(
             listeners: [makeRow(pid: 9, port: 8080)],
-            connections: []
+            connections: [makeRow(pid: 10, port: 443, activityKind: .connection)]
         )
         let scanner = SequencedMonitorScanner(outcomes: [
             .success(snapshot: firstSnapshot, diagnostics: zeroDiagnostics),
@@ -426,11 +426,8 @@ final class PortMonitorTests: XCTestCase {
         await waitUntil { await scanner.scanCount() == 1 }
         XCTAssertTrue(monitor.hasSnapshot)
         XCTAssertEqual(monitor.listenerRows, firstSnapshot.listeners)
-        XCTAssertTrue(monitor.listenersExpanded)
-        XCTAssertFalse(monitor.connectionsExpanded)
-
-        monitor.connectionsExpanded = true
-        monitor.listenersExpanded = false
+        XCTAssertEqual(monitor.connectionRows, firstSnapshot.connections)
+        XCTAssertEqual(monitor.allRows, [firstSnapshot.connections[0], firstSnapshot.listeners[0]])
         monitor.refresh()
         await waitUntil { await scanner.scanCount() == 2 }
         XCTAssertEqual(monitor.listenerRows, firstSnapshot.listeners)
@@ -439,8 +436,48 @@ final class PortMonitorTests: XCTestCase {
 
         monitor.setPresented(false)
         XCTAssertFalse(monitor.isPopoverPresented)
-        XCTAssertTrue(monitor.listenersExpanded)
-        XCTAssertFalse(monitor.connectionsExpanded)
+    }
+
+    func testBackgroundRefreshDoesNotSetManualRefreshState() async {
+        let clock = ManualMonitorClock()
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics),
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
+
+        await waitUntil { await clock.waitingCount() == 1 }
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
+    }
+
+    func testManualRefreshStateIsSeparateFromBackgroundScan() async {
+        let scanner = BlockingMonitorScanner(snapshot: .empty)
+        let monitor = PortMonitor(scanner: scanner, terminator: NoopTerminator(), ownPID: 999)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 }
+        XCTAssertTrue(monitor.isScanning)
+        XCTAssertFalse(monitor.isManualRefreshing)
+
+        monitor.refresh()
+        XCTAssertTrue(monitor.isManualRefreshing)
+
+        await scanner.releaseFirstScan()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isManualRefreshing)
     }
 
     func testSuccessfulEmptyScanReplacesThePreviousSnapshot() async {
@@ -1131,11 +1168,16 @@ private func identity(_ pid: Int32, _ seconds: UInt64) -> ProcessIdentity {
     ProcessIdentity(pid: pid, startTimeSeconds: seconds, startTimeMicroseconds: 1)
 }
 
-private func makeRow(pid: Int32, port: Int, name: String = "process") -> PortProcess {
+private func makeRow(
+    pid: Int32,
+    port: Int,
+    name: String = "process",
+    activityKind: PortActivityKind = .listener
+) -> PortProcess {
     let processIdentity = identity(pid, 1)
     return PortProcess(
         id: PortProcess.makeID(
-            activityKind: .listener,
+            activityKind: activityKind,
             transport: .tcp,
             localPort: port,
             pid: pid,
@@ -1148,7 +1190,7 @@ private func makeRow(pid: Int32, port: Int, name: String = "process") -> PortPro
         transport: .tcp,
         processName: name,
         endpoints: [Endpoint(rawValue: "*:8080", localPort: port, hasRemoteEndpoint: false, socketState: "LISTEN")],
-        activityKind: .listener
+        activityKind: activityKind
     )
 }
 

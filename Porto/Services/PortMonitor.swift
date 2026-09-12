@@ -7,13 +7,11 @@ final class PortMonitor: ObservableObject {
     @Published private(set) var listenerRows: [PortProcess] = []
     @Published private(set) var connectionRows: [PortProcess] = []
     @Published private(set) var isScanning = false
+    @Published private(set) var isManualRefreshing = false
     @Published private(set) var hasSnapshot = false
     @Published private(set) var isStale = false
     @Published private(set) var scanError: ScanFailure?
-    @Published private(set) var lastSuccessfulScanAt: Date?
     @Published private(set) var lastDiagnostics: ScanDiagnostics?
-    @Published var listenersExpanded = true
-    @Published var connectionsExpanded = false
     @Published private(set) var terminationStates: [ProcessIdentity: TerminationUIState] = [:]
     @Published private(set) var forceKillPrompt: PortProcess?
 
@@ -28,6 +26,8 @@ final class PortMonitor: ObservableObject {
     private var terminationToken: UUID?
     private var activeTerminationIdentity: ProcessIdentity?
     private var pendingRefresh = false
+    private var pendingManualRefresh = false
+    private var activeScanIsManual = false
     private var sessionGeneration: UInt64 = 0
     private var scanGeneration: UInt64 = 0
     private var isPresented = false
@@ -48,7 +48,7 @@ final class PortMonitor: ObservableObject {
     var isPopoverPresented: Bool { isPresented }
 
     var allRows: [PortProcess] {
-        listenerRows + connectionRows
+        PortProcessSort.sort(listenerRows + connectionRows)
     }
 
     func setPresented(_ presented: Bool) {
@@ -57,17 +57,17 @@ final class PortMonitor: ObservableObject {
         sessionGeneration &+= 1
 
         if presented {
-            listenersExpanded = true
-            connectionsExpanded = false
             pendingRefresh = false
+            pendingManualRefresh = false
+            isManualRefreshing = false
             startRefreshLoop()
             requestRefresh()
         } else {
             refreshTask?.cancel()
             refreshTask = nil
             pendingRefresh = false
-            listenersExpanded = true
-            connectionsExpanded = false
+            pendingManualRefresh = false
+            isManualRefreshing = false
             forceKillPrompt = nil
             scanTask?.cancel()
             // Keep scanToken until its cancellation cleanup completes. A new
@@ -76,11 +76,11 @@ final class PortMonitor: ObservableObject {
     }
 
     func refresh() {
-        requestRefresh()
+        requestRefresh(isManual: true)
     }
 
     func retry() {
-        requestRefresh()
+        requestRefresh(isManual: true)
     }
 
     func terminationState(for row: PortProcess) -> TerminationUIState? {
@@ -173,6 +173,8 @@ final class PortMonitor: ObservableObject {
         refreshTask = nil
         scanTask?.cancel()
         terminationTask?.cancel()
+        pendingManualRefresh = false
+        isManualRefreshing = false
         let scanner = self.scanner
         Task { [weak self] in
             await scanner.cancelActiveWork()
@@ -184,12 +186,18 @@ final class PortMonitor: ObservableObject {
         }
     }
 
-    private func requestRefresh() {
+    private func requestRefresh(isManual: Bool = false) {
         guard isPresented, !quitRequested else { return }
         pendingRefresh = true
+        if isManual {
+            pendingManualRefresh = true
+            isManualRefreshing = true
+        }
         guard activeTerminationIdentity == nil, scanToken == nil else { return }
         pendingRefresh = false
-        startScan()
+        let shouldStartManualRefresh = pendingManualRefresh
+        pendingManualRefresh = false
+        startScan(isManual: shouldStartManualRefresh)
     }
 
     private func startRefreshLoop() {
@@ -210,7 +218,7 @@ final class PortMonitor: ObservableObject {
         }
     }
 
-    private func startScan() {
+    private func startScan(isManual: Bool) {
         guard isPresented,
               !quitRequested,
               activeTerminationIdentity == nil,
@@ -220,6 +228,7 @@ final class PortMonitor: ObservableObject {
         let session = sessionGeneration
         let token = UUID()
         scanToken = token
+        activeScanIsManual = isManual
         isScanning = true
         let scanner = self.scanner
         scanTask = Task { [weak self] in
@@ -231,9 +240,15 @@ final class PortMonitor: ObservableObject {
 
     private func finishScan(_ outcome: ScanOutcome, session: UInt64, token: UUID) {
         guard scanToken == token else { return }
+        let finishedManualRefresh = activeScanIsManual
+        activeScanIsManual = false
         scanToken = nil
         scanTask = nil
         isScanning = false
+
+        if finishedManualRefresh && !pendingManualRefresh {
+            isManualRefreshing = false
+        }
 
         if session == sessionGeneration, isPresented, !quitRequested {
             switch outcome {
@@ -242,7 +257,6 @@ final class PortMonitor: ObservableObject {
                 isStale = false
                 if listenerRows != snapshot.listeners { listenerRows = snapshot.listeners }
                 if connectionRows != snapshot.connections { connectionRows = snapshot.connections }
-                lastSuccessfulScanAt = Date()
                 lastDiagnostics = diagnostics
                 scanError = nil
                 clearTerminationStatesForMissingIdentities(in: snapshot)
@@ -259,6 +273,8 @@ final class PortMonitor: ObservableObject {
 
         if !isPresented {
             pendingRefresh = false
+            pendingManualRefresh = false
+            isManualRefreshing = false
         } else {
             drainPendingRefreshIfPossible()
         }
@@ -307,7 +323,9 @@ final class PortMonitor: ObservableObject {
               activeTerminationIdentity == nil,
               scanToken == nil else { return }
         pendingRefresh = false
-        startScan()
+        let shouldStartManualRefresh = pendingManualRefresh
+        pendingManualRefresh = false
+        startScan(isManual: shouldStartManualRefresh)
     }
 
     private func removeRows(for identity: ProcessIdentity) {
