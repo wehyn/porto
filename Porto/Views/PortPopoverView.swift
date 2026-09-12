@@ -31,7 +31,7 @@ struct PortPopoverView: View {
             footer
         }
         .frame(width: 360)
-        .frame(minHeight: 180, maxHeight: 560)
+        .frame(minHeight: 180, idealHeight: 560, maxHeight: 560)
         .confirmationDialog(forceKillTitle, isPresented: forceKillPromptBinding, titleVisibility: .visible) {
             Button("Force Kill", role: .destructive) { monitor.confirmForceKill() }
             Button("Cancel", role: .cancel) { monitor.cancelForceKillPrompt() }
