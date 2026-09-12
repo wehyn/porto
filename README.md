@@ -63,12 +63,19 @@ applied after parsing, so scan diagnostics still account for every valid remote
 record. Listeners and active connections appear together in one list, sorted by
 local port.
 
+OrbStack runs on this Mac rather than as a separate remote target. Its
+host-published listeners are included in the This Mac scan while OrbStack is
+running and disappear when it is stopped. Porto does not offer OrbStack's
+generated `orb` SSH alias or the key-only `github.com` entry as remote targets.
+
 ## Remote Linux targets
 
-Porto discovers literal aliases from `~/.ssh/config` when the popover opens. It
-does not connect or run `Match exec` just to populate the picker. Wildcard,
-negated, and `Match`-only entries are ignored; aliases are sorted and passed to
-OpenSSH exactly as configured. To add a target, configure it in OpenSSH first:
+Porto discovers literal Linux aliases from `~/.ssh/config` when the popover
+opens. It does not connect or run `Match exec` just to populate the picker.
+Wildcard, negated, and `Match`-only entries are ignored; the key-only
+`github.com` entry and OrbStack's local-only `orb` alias are also omitted.
+Other aliases are sorted and passed to OpenSSH exactly as configured. To add a
+remote target, configure it in OpenSSH first:
 
 ```sshconfig
 Host porto-linux
