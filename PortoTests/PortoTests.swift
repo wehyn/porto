@@ -4,12 +4,18 @@ import XCTest
 @testable import Porto
 
 final class PortVisibilityPolicyTests: XCTestCase {
-    func testDeveloperPolicyHidesXserveRaidPortAndKnownInfrastructure() {
+    func testDeveloperPolicyHidesKnownInfrastructureWithoutHidingCustomPorts() {
         let policy = PortVisibilityPolicy.developerFocused
 
-        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "my-app")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "rapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "remotepairingd")))
         XCTAssertFalse(policy.includes(parsedGroup(port: 5000, processName: "ControlCenter")))
-        XCTAssertFalse(policy.includes(parsedGroup(port: 64776, processName: "crapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 64776, processName: "rapportd")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 62096, processName: "replicatord")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 6463, processName: "Discord Helper (Renderer)")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 52369, processName: "Zen")))
+        XCTAssertTrue(policy.includes(parsedGroup(port: 3722, processName: "my-app")))
+        XCTAssertTrue(policy.includes(parsedGroup(port: 5000, processName: "my-local-app")))
     }
 
     func testDeveloperPolicyKeepsCustomPortsVisible() {
@@ -204,7 +210,7 @@ final class PortScannerTests: XCTestCase {
 
     func testDeveloperFocusedPolicyFiltersNoiseBeforeIdentityEnrichment() async {
         let output = nulFixture([
-            "p100", "ccraportd", "f1", "PUDP", "n*:3722",
+            "p100", "crapportd", "f1", "PUDP", "n*:3722",
             "p101", "cControlCenter", "f2", "PTCP", "n*:5000", "TST=LISTEN",
             "p102", "cmy-local-app", "f3", "PTCP", "n127.0.0.1:45678", "TST=LISTEN"
         ])
