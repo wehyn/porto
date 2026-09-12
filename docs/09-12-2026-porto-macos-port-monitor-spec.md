@@ -8,7 +8,11 @@
 
 ## 1. Purpose
 
-Porto is a lightweight, menu-bar-only macOS utility for developers who need to see which local processes are listening on ports or holding active Internet connections and, when necessary, stop one of those processes.
+Porto is a lightweight, menu-bar-only macOS utility for developers who need to
+see which local processes are listening on ports or holding active Internet
+connections and, when necessary, stop one of those processes. It can also
+inspect one selected Linux host over SSH; that remote view is read-only and
+never participates in process termination.
 
 This specification defines the v1 product behavior, architecture, data contract, process-safety rules, error handling, performance limits, test coverage, and release acceptance criteria. **Must** is release-blocking, **should** requires a documented reason to omit, and **may** is optional.
 
@@ -20,6 +24,7 @@ This specification defines the v1 product behavior, architecture, data contract,
 - Show listeners and active connections together in one focused view without category controls.
 - Refresh while the user is viewing the list without continuously polling in the background.
 - Let the user request a graceful process stop and deliberately escalate to force kill only when necessary.
+- Let the user select one literal SSH alias and inspect Linux TCP/UDP activity without remote controls.
 - Remain responsive and low-overhead on a busy development machine.
 - Protect against stale rows and PID reuse before every signal.
 
@@ -29,8 +34,9 @@ V1 is acceptable only when all of the following are true:
 
 - Opening Porto immediately starts a scan and presents current rows, a first-load state, or an actionable scan error.
 - All visible listener and connection rows appear in one unified list with no category disclosure controls.
+- This Mac remains the default target; a selected remote target shows all valid rows and marks them read-only.
 - Results refresh every 2 seconds while the popover is open and do not refresh while it is closed.
-- There is never more than one `lsof` process in flight across normal scans and termination revalidation.
+- There is never more than one Porto-owned local `lsof` or remote SSH scan child in flight.
 - Normal stop never sends SIGKILL. Force Kill is unavailable until SIGTERM has failed to end the revalidated process within the defined grace period.
 - Every signal attempt revalidates immutable process identity and the selected port activity.
 - The generated `.app` is launched and exercised on macOS 26; a successful build alone is not acceptance.
@@ -59,7 +65,7 @@ V1 is acceptable only when all of the following are true:
 - Port forwarding, firewall management, packet capture, bandwidth measurement, or historical activity.
 - Search, filtering, sorting controls, process icons, code-signing metadata lookup, or application bundle resolution.
 - Terminal launch, command copy, or IDE integration. The row/action design must leave room for these later.
-- Remote hosts, containers, virtual machines, or processes not visible to the current macOS user context.
+- Arbitrary hostname entry, multi-host dashboards, containers, virtual machines, and remote controls. Remote inspection is limited to one literal SSH alias at a time.
 - App Store, Developer ID distribution, notarization, auto-update, analytics, crash reporting, or telemetry. Public distribution requires a separate specification.
 
 ## 4. Definitions and classification
@@ -70,9 +76,11 @@ V1 is acceptable only when all of the following are true:
 - **Listener:** A TCP socket whose state is `LISTEN`, or a UDP socket with a local endpoint and no remote endpoint.
 - **Connection:** A non-`LISTEN` TCP socket with local and remote endpoints, or a UDP socket with both endpoints.
 - **Socket record:** One parsed `lsof` file set.
-- **Row:** Socket records grouped by activity kind, protocol, local port, and process identity.
+- **Row:** Socket records grouped by activity kind, protocol, local port, and process origin.
 - **Process identity:** PID plus process start time obtained from the macOS process API. PID or process name alone is unsafe.
 - **Visible:** The popover is actually presented, not merely that Porto is running or its menu-bar item exists.
+- **Target:** Either This Mac or one literal alias discovered from the user's `~/.ssh/config`.
+- **Remote row:** A socket parsed from the selected Linux host. Its Linux PID and process name are informational and it is never actionable.
 
 Sockets without a numeric local port, with unsupported protocols, or that cannot be classified must be skipped individually and counted for diagnostics. They must not invalidate otherwise usable rows.
 
@@ -136,6 +144,15 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 - Force-kill eligibility belongs to the current immutable process identity and disappears when that identity exits or changes.
 - Porto never exposes termination controls for its own PID. If Porto appears, it is non-actionable with help text `Porto cannot stop itself.`
 
+### 5.7 Target selection and remote Linux view
+
+- The target selector is placed under `WATCHING` and contains `This Mac` plus literal aliases read from `~/.ssh/config`. Aliases are discovered from files only; picker population never launches SSH or executes configuration helpers.
+- This Mac is selected by default. A target change invalidates the old scan session before cancellation, cancels the old remote work, and starts one scan for the new target only after the old runner has released its child.
+- Remote status uses `Connecting over SSH…`, `Available over SSH · updated just now · read-only`, `Refreshing… · read-only`, and `Reconnecting… · showing in-memory results`. It must not say `SSH connected` while idle because scans use short-lived SSH children.
+- Remote rows show a lock/read-only treatment and expose no stop or force-kill action. This guard exists in the view, monitor, model, and terminator layers.
+- One successful snapshot is retained in memory per target until quit. A failure keeps that target's rows and marks them stale; a first failure shows an actionable retry without a false empty success.
+- A listener is evidence on the selected server, not a claim about reachability from another network or the public Internet. Missing Linux process metadata does not hide an otherwise valid socket.
+
 ## 6. Data model and grouping
 
 The implementation may refine names but must preserve these semantics:
@@ -164,9 +181,14 @@ struct Endpoint: Hashable, Sendable {
     let socketState: String?
 }
 
+enum PortProcessOrigin: Hashable, Sendable, Codable {
+    case local(ProcessIdentity)
+    case remote(targetID: PortTargetID, pid: Int32?)
+}
+
 struct PortProcess: Identifiable, Equatable, Sendable {
     let id: String
-    let identity: ProcessIdentity?
+    let origin: PortProcessOrigin
     let localPort: Int
     let transport: TransportProtocol
     let processName: String
@@ -175,12 +197,17 @@ struct PortProcess: Identifiable, Equatable, Sendable {
 }
 ```
 
-`PortProcess.id` is a stable serialization of activity kind, transport, local port, PID, and process start time. A missing identity uses a scan-generation-scoped fallback and produces a non-actionable row; it must never enable termination.
+`PortProcess.id` is a stable serialization of activity kind, transport, local
+port, and origin. Local rows include process start time; a missing local
+identity uses a scan-generation-scoped fallback and produces a non-actionable
+row. Remote rows are target-scoped and use the Linux PID plus normalized name,
+socket cookie, inode, or a canonical endpoint tuple. A remote PID is never
+treated as a macOS `ProcessIdentity` and can never enable termination.
 
 The grouping key is:
 
 ```text
-activity kind + transport protocol + local port + process identity
+activity kind + transport protocol + local port + process origin
 ```
 
 Consequences:
@@ -239,7 +266,7 @@ The executable URL is fixed in code and never contains user-controlled text.
 - TCP `LISTEN` is a listener. Other TCP records require a remote endpoint and are connections.
 - UDP with a remote endpoint is a connection; UDP without one is a listener.
 - Normalize protocol and state to uppercase.
-- During byte parsing, deduplicate into a preliminary dictionary keyed by activity kind, protocol, local port, and PID instead of building an unbounded flat socket list. After identity enrichment, form the final grouping key by replacing bare PID with `ProcessIdentity`.
+- During byte parsing, deduplicate into a preliminary dictionary keyed by activity kind, protocol, local port, and PID instead of building an unbounded flat socket list. For local rows, replace bare PID with `ProcessIdentity`; remote rows retain a target-scoped owner or socket identity.
 - Deduplicate endpoint observations by normalized endpoint text and socket state, then sort them before publishing so unchanged scans compare equal.
 
 ### 7.4 Process identity enrichment
@@ -250,6 +277,37 @@ The executable URL is fixed in code and never contains user-controlled text.
 - Display name comes from the `lsof` `c` field. It is not immutable identity and cannot be the sole PID-reuse defense.
 - Identity work runs off the main actor and is bounded by the distinct PIDs in the scan.
 
+### 7.5 Remote scanner contract
+
+Remote inspection is enabled only for a selected literal SSH alias. `SSHHostCatalog`
+reads `~/.ssh/config` and bounded `Include` files without launching a process or
+opening a connection. It accepts safe literal aliases, ignores wildcards,
+negation, and `Match` blocks, sorts and de-duplicates them deterministically,
+and retains the prior catalog on a transient read failure.
+
+`SSHCommandRunner` launches exactly one direct `/usr/bin/ssh` child with the
+following arguments (the alias is passed after `--`):
+
+```text
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin ss -H -n -O -a -t -u -p -e
+```
+
+The command and its environment are fixed except for inherited SSH settings
+(including `SSH_AUTH_SOCK`) and `LC_ALL=C`. `ss` output is drained concurrently,
+bounded at 16 MiB stdout and 256 KiB stderr, and has a five-second total
+deadline. Cancellation, timeout, read failure, or overflow terminates the
+local SSH child, waits up to 500 milliseconds, force-kills only that child if
+needed, and awaits cleanup. Remote command output is decoded and parsed without
+shell interpolation; raw output is never surfaced or persisted.
+
+The parser supports numeric IPv4/IPv6, wildcard, loopback, and interface-
+qualified endpoints; TCP `LISTEN` and unconnected UDP are listeners, while
+remote-endpoint TCP/UDP rows are connections. Owner metadata is optional. A
+successful empty result is valid, and a successful remote row is always marked
+with its target origin and read-only state. Exit status 255 alone is a generic
+transport failure; bounded `LC_ALL=C` diagnostics may classify authentication,
+host-key, reachability, timeout, or missing/incompatible `ss` failures.
+
 ## 8. Refresh and concurrency architecture
 
 ### 8.1 Components
@@ -257,6 +315,8 @@ The executable URL is fixed in code and never contains user-controlled text.
 - `PortMonitor` is a `@MainActor` observable model for rows, presentation, section expansion, scan status, timestamps, errors, and per-process termination state.
 - `PortScanner` is an injected `Sendable` service or actor for subprocess execution and parsing away from the main actor.
 - `LsofRunner` is the single serialized owner of every normal and targeted `lsof` child.
+- `SSHHostCatalog` reads the user's SSH configuration files with bounded, deterministic include traversal.
+- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed, read-only Linux `ss` query for the selected alias.
 - `ProcessInspector` reads immutable process identity and existence.
 - `ProcessTerminator` coordinates validation and signaling away from the main actor.
 - `MenuPresentationObserver` reports actual popover presentation.
@@ -270,7 +330,7 @@ idle -> scanning -> idle
           + pending -+
 ```
 
-- At most one normal scan task exists, and at most one `lsof` child of any kind exists at a time.
+- At most one normal scan task exists, and at most one local `lsof` or remote SSH child belongs to Porto at a time.
 - A request during `scanning` sets one Boolean pending flag; later requests add nothing.
 - After completion, run one follow-up only if pending is true and the popover is still visible.
 - A stop action has priority over automatic refresh: it cancels or waits for the current normal child to exit, then starts targeted validation through the same `LsofRunner`. Timer/manual requests received meanwhile coalesce into one later normal refresh.
@@ -279,6 +339,8 @@ idle -> scanning -> idle
 - Generation tokens or structured cancellation prevent an older visibility session from publishing into a newer one.
 - UI publication occurs only on the main actor.
 - Swift 6 strict-concurrency warnings in project-owned code are treated as errors.
+- A target change increments the session before cancellation; a late result is
+  discarded unless its scan token, target ID, and session generation all match.
 
 ### 8.3 Popover lifecycle
 
@@ -291,6 +353,12 @@ idle -> scanning -> idle
 - If macOS 26 behavior differs, implementation must change to meet the observable no-background-scan requirement rather than weaken it.
 
 ## 9. Process termination safety
+
+Termination is a This Mac capability only. `ProcessTerminator` accepts local
+socket validation and immutable macOS process identities; a remote-origin row
+is rejected before it can reach validation or a signal sender. Remote Linux
+PIDs, names, cookies, and endpoints are informational and Porto never sends a
+remote signal or invokes `sudo`, `doas`, `ss --kill`, or an installed helper.
 
 ### 9.1 Revalidation before SIGTERM
 
@@ -378,9 +446,9 @@ When no snapshot exists, omit `Showing the last results.` and display a retry ac
 
 ## 12. Performance and resources
 
-- Closed popover: zero recurring timers, zero normal `lsof` children, and no scan CPU activity after user-requested termination work settles.
-- Open popover: at most one normal scan and one pending request; across normal and targeted work there is at most one `lsof` child.
-- No per-row timers, polling, subprocesses, network requests, bundle lookups, or continuous animations.
+- Closed popover: zero recurring timers, zero normal `lsof` or SSH children, and no scan CPU activity after user-requested termination work settles.
+- Open popover: at most one normal scan and one pending request; across local and selected-remote work there is at most one Porto-owned `lsof` or SSH child.
+- No per-row timers, polling, subprocesses, bundle lookups, or continuous animations. A remote SSH request occurs only for the selected target while visible or after an explicit retry.
 - Process launch, pipe reads, parsing, sorting, and identity enrichment run off the main actor.
 - Publish sorted immutable rows only when meaningful values change.
 - Retain only the current successful grouped snapshot, current errors, timestamps, and termination states. Release raw scan data after each scan.
@@ -390,13 +458,17 @@ When no snapshot exists, omit `Showing the last results.` and display a retry ac
 
 ## 13. Privacy and security
 
-- Processing is local. Porto makes no network requests and collects no telemetry.
-- Do not persist port lists, IP addresses, process lists, raw `lsof` output, or termination history.
+- This Mac processing is local and makes no network requests. Selecting a remote target is the explicit exception: Porto sends only the fixed `ss` query through the user's `/usr/bin/ssh` configuration and receives its bounded result; it collects no telemetry.
+- Do not persist port lists, IP addresses, process lists, raw `lsof`/`ss` output, or termination history.
 - Debug logs omit raw endpoints and command output. PID, aggregate counts, duration, result category, and exit code are allowed.
 - Do not accept executable paths, shell fragments, PIDs, or signal values from external input.
 - Do not use private frameworks or private SwiftUI/AppKit APIs.
 - App Sandbox is disabled in v1 because Porto executes `/usr/sbin/lsof` and inspects/signals peer processes. Hardened runtime and distribution entitlements wait for the distribution plan.
 - Signals operate only on current, revalidated snapshot rows. There is no arbitrary PID entry.
+- Remote inspection trusts the user's SSH configuration, including any configured
+  `ProxyJump`, `ProxyCommand`, `KnownHostsCommand`, or `Match exec` helper. Porto
+  does not disable normal host-key verification, replace known-host files, or
+  accept passwords, passphrases, or keys in its UI.
 
 ## 14. Project and build configuration
 
@@ -489,6 +561,10 @@ Fixtures are sanitized and contain no user-specific public IPs or process data.
 - Old-generation result suppression after close/reopen.
 - Equal rows not republished.
 - One identity lookup per distinct PID per scan.
+- Remote target selection, fixed SSH argument contract, bounded output and
+  timeout/cancellation cleanup, diagnostic classification, target-scoped IDs,
+  ownerless sockets, per-target cache retention, stale-result suppression,
+  bounded failure backoff, and read-only termination guards.
 
 ### 15.3 Termination tests
 
@@ -527,12 +603,25 @@ Run the generated Debug `.app` on macOS 26 and verify:
 - Menu-bar icon with no Dock or application-switcher presence.
 - Popover sizing, scrolling, dismissal, and reopening on tested display edges.
 - Immediate open scan and stopped periodic scanning after status-item toggle, outside click, Escape, or app switch.
-- Activity Monitor shows no normal `lsof` child while closed and never more than one while open.
+- Activity Monitor shows no normal `lsof` or SSH child while closed and never more than one Porto-owned scan child while open.
 - Stable memory and no interaction stalls over 10 minutes.
 - Usable behavior with hundreds of connection rows.
 - Disposable server graceful stop and explicit force-kill fixture behavior.
 - Permission failure keeps its row with accessible feedback.
 - About uses the standard panel; Quit ends tasks and child processes.
+
+### 15.6 Remote runtime acceptance
+
+When representative Linux hosts are available, verify a Debian/Ubuntu host,
+an independently packaged iproute2 host, and a non-root account with incomplete
+process visibility. Compare Porto's rows with the exact `ss -H -n -O -a -t -u
+-p -e` output, including TCP/UDP classification, IPv4/IPv6 endpoints, wildcard
+listeners, stable IDs, and retained ownerless sockets. Exercise authentication,
+host-key, unreachable, timeout, and incompatible-`ss` failures; switch targets
+while SSH is delayed; confirm cancellation leaves no child or stale rows; and
+verify that no remote file, service, configuration change, privilege
+escalation, or signal is attempted. Treat ordinary SSH authentication and audit
+logging as expected user-owned side effects, not as Porto persistence.
 
 ## 16. Acceptance traceability
 
@@ -542,14 +631,15 @@ Run the generated Debug `.app` on macOS 26 and verify:
 | AC-02 | Listeners and connections appear together in one unified list without category controls | UI and manual tests |
 | AC-03 | TCP/UDP classification and grouping follow Sections 4 and 7 | Parser fixtures |
 | AC-04 | Immediate open scan and 2-second visible-only refresh | Clock test and runtime observation |
-| AC-05 | One total `lsof` child; one normal scan and one coalesced refresh maximum | Concurrency tests and Activity Monitor |
+| AC-05 | One total Porto-owned `lsof` or SSH child; one normal scan and one coalesced refresh maximum | Concurrency tests and Activity Monitor |
 | AC-06 | Failure retains valid snapshot; successful empty scan clears it | Scanner tests |
 | AC-07 | Normal stop revalidates identity and selected socket | Termination tests |
 | AC-08 | SIGTERM gets 2 seconds; SIGKILL needs confirmation and fresh validation | Integration and UI tests |
 | AC-09 | Icon-only actions are keyboard and VoiceOver accessible | Accessibility audit |
 | AC-10 | Closed state has no recurring scanner or child | Instruments and Activity Monitor |
 | AC-11 | Generate, test, build, and actual app launch all succeed | Clean-checkout release check |
-| AC-12 | No raw port/process data is persisted or transmitted | Code review and network observation |
+| AC-12 | No raw port/process data is persisted or emitted outside an explicit selected SSH scan | Code review and filesystem/network observation |
+| AC-13 | Remote aliases, fixed command, read-only rows, cache isolation, and bounded failures | Catalog/runner/parser/monitor tests and Linux acceptance |
 
 ## 17. Delivery sequence and definition of done
 
