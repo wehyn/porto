@@ -12,9 +12,10 @@ struct PortProcessRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .help(row.processName)
-                Text("\(row.localPort)")
+                Text(portSummary)
                     .font(.caption2.monospacedDigit().weight(.medium))
                     .foregroundStyle(.secondary)
+                    .help(portHelp)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             actions
@@ -31,7 +32,24 @@ struct PortProcessRow: View {
         let activity = row.activityKind == .listener ? "listener" : "connection"
         let endpoints = row.endpoints.map(\.rawValue).joined(separator: ", ")
         let access = row.isRemote ? ", read-only" : ""
-        return "\(monitor.selectedTarget.displayName), \(process), \(row.transport.rawValue), local port \(row.localPort), \(activity), \(endpoints)\(access)"
+        let portLabel = row.localPorts.count == 1 ? "local port" : "local ports"
+        return "\(monitor.selectedTarget.displayName), \(process), \(transportSummary), \(portLabel) \(accessiblePortSummary), \(activity), \(endpoints)\(access)"
+    }
+
+    private var portSummary: String {
+        row.localPorts.map(String.init).joined(separator: ", ")
+    }
+
+    private var accessiblePortSummary: String {
+        row.localPorts.map(String.init).joined(separator: " and ")
+    }
+
+    private var portHelp: String {
+        "\(transportSummary), ports \(portSummary)"
+    }
+
+    private var transportSummary: String {
+        row.transports.map(\.rawValue).joined(separator: " and ")
     }
 
     @ViewBuilder

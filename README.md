@@ -58,10 +58,15 @@ custom project ports visible. Remote targets hide common host-service ports
 (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) while keeping custom
 project ports visible. Remote `Unknown process` rows are hidden; published
 Docker ports are retained—even when they use a common host-service port—and
-labeled `Docker · <container>` from optional Docker metadata. The filter is
+labeled `Docker · <container>` from optional Docker metadata. IPv4/IPv6, TCP/UDP,
+and multiple published host-port records for the same target, container ID, and
+activity kind are shown as one logical row. The row lists each host port once
+(for example, `53, 80`) and combines protocol and endpoint details; different
+containers remain separate even when their visible names match. The filter is
 applied after parsing, so scan diagnostics still account for every valid remote
-record. Listeners and active connections appear together in one list, sorted by
-local port.
+record. Rows without a usable Docker ID stay at socket-level granularity.
+Listeners and active connections appear together in one list, sorted by the
+first local port in each row.
 
 OrbStack runs on this Mac rather than as a separate remote target. Its
 host-published listeners are included in the This Mac scan while OrbStack is
@@ -129,7 +134,7 @@ not display or store raw SSH stderr, endpoints, process lists, or snapshots.
 
 On the accepted macOS environment, verify that the menu-bar icon is present,
 all visible activity appears in one list, rows show the process name with its
-local port beneath it and no category or per-process disclosures, and scrolling
+local port or ordered host-port list beneath it and no category or per-process disclosures, and scrolling
 remains native. Use a disposable
 current-user TCP server to exercise SIGTERM and a
 SIGTERM-ignoring fixture to verify that Force Kill appears only after the grace
