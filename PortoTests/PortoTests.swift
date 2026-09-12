@@ -3,6 +3,35 @@ import Foundation
 import XCTest
 @testable import Porto
 
+final class PortVisibilityPolicyTests: XCTestCase {
+    func testDeveloperPolicyHidesXserveRaidPortAndKnownInfrastructure() {
+        let policy = PortVisibilityPolicy.developerFocused
+
+        XCTAssertFalse(policy.includes(parsedGroup(port: 3722, processName: "my-app")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 5000, processName: "ControlCenter")))
+        XCTAssertFalse(policy.includes(parsedGroup(port: 64776, processName: "crapportd")))
+    }
+
+    func testDeveloperPolicyKeepsCustomPortsVisible() {
+        let policy = PortVisibilityPolicy.developerFocused
+
+        XCTAssertTrue(policy.includes(parsedGroup(port: 45678, processName: "my-local-app")))
+    }
+
+    private func parsedGroup(port: Int, processName: String) -> ParsedPortGroup {
+        ParsedPortGroup(
+            key: PreliminaryGroupKey(
+                activityKind: .listener,
+                transport: .tcp,
+                localPort: port,
+                pid: 10
+            ),
+            processName: processName,
+            endpoints: []
+        )
+    }
+}
+
 final class LsofParserTests: XCTestCase {
     func testClassifiesAndGroupsTCPUDPIPv4IPv6AndSharedKeys() {
         let parsed = LsofParser().parse(mixedFixture)
@@ -171,6 +200,36 @@ final class PortScannerTests: XCTestCase {
         XCTAssertEqual(inspector.callCount(for: 100), 1)
         XCTAssertEqual(inspector.callCount(for: 200), 1)
         XCTAssertEqual(snapshot.listeners.first(where: { $0.pid == 100 })?.identity, identity(100, 10))
+    }
+
+    func testDeveloperFocusedPolicyFiltersNoiseBeforeIdentityEnrichment() async {
+        let output = nulFixture([
+            "p100", "ccraportd", "f1", "PUDP", "n*:3722",
+            "p101", "cControlCenter", "f2", "PTCP", "n*:5000", "TST=LISTEN",
+            "p102", "cmy-local-app", "f3", "PTCP", "n127.0.0.1:45678", "TST=LISTEN"
+        ])
+        let inspector = StubInspector(
+            identities: [
+                100: identity(100, 10),
+                101: identity(101, 11),
+                102: identity(102, 12)
+            ]
+        )
+        let scanner = PortScanner(
+            runner: StubLsofRunner(responses: [execution(stdout: output)]),
+            inspector: inspector
+        )
+
+        let outcome = await scanner.scan(generation: 1)
+
+        guard case let .success(snapshot, diagnostics) = outcome else {
+            return XCTFail("expected a successful scan")
+        }
+        XCTAssertEqual(diagnostics.validRecords, 3)
+        XCTAssertEqual(snapshot.listeners.map(\.localPort), [45678])
+        XCTAssertEqual(inspector.callCount(for: 100), 0)
+        XCTAssertEqual(inspector.callCount(for: 101), 0)
+        XCTAssertEqual(inspector.callCount(for: 102), 1)
     }
 
     func testEmptyExitOneIsAValidEmptySnapshot() async {
@@ -982,6 +1041,7 @@ final class RealProcessIntegrationTests: XCTestCase {
               let row = snapshot.listeners.first(where: { $0.pid == server.process.processIdentifier && $0.transport == .tcp }) else {
             return XCTFail("disposable server was not discovered")
         }
+        XCTAssertFalse(snapshot.allRows.contains { $0.localPort == 3722 })
         let validation = await scanner.validateSocket(for: row)
         XCTAssertEqual(validation, .matched(processName: row.processName))
         let terminator = ProcessTerminator(

@@ -60,11 +60,17 @@ actor PortScanner: PortScanning {
 
     private let runner: any LsofRunning
     private let inspector: any ProcessInspecting
+    private let visibilityPolicy: PortVisibilityPolicy
     private let parser = LsofParser()
 
-    init(runner: any LsofRunning, inspector: any ProcessInspecting) {
+    init(
+        runner: any LsofRunning,
+        inspector: any ProcessInspecting,
+        visibilityPolicy: PortVisibilityPolicy = .developerFocused
+    ) {
         self.runner = runner
         self.inspector = inspector
+        self.visibilityPolicy = visibilityPolicy
     }
 
     func scan(generation: UInt64) async -> ScanOutcome {
@@ -106,7 +112,8 @@ actor PortScanner: PortScanning {
             return .failure(error: .malformedOutput, diagnostics: diagnostics)
         }
 
-        let snapshot = enrich(parsed.groups, generation: generation)
+        let visibleGroups = parsed.groups.filter(visibilityPolicy.includes)
+        let snapshot = enrich(visibleGroups, generation: generation)
         return .success(snapshot: snapshot, diagnostics: diagnostics)
     }
 
