@@ -56,9 +56,12 @@ The default view is developer-focused for This Mac: it hides known macOS
 infrastructure plus Zen and Discord helper processes by name, while keeping
 custom project ports visible. Remote targets hide common host-service ports
 (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) while keeping custom
-project ports visible; the filter is applied after parsing, so scan diagnostics
-still account for every valid remote record. Listeners and active connections
-appear together in one list, sorted by local port.
+project ports visible. Remote `Unknown process` rows are hidden; published
+Docker ports are retained—even when they use a common host-service port—and
+labeled `Docker · <container>` from optional Docker metadata. The filter is
+applied after parsing, so scan diagnostics still account for every valid remote
+record. Listeners and active connections appear together in one list, sorted by
+local port.
 
 ## Remote Linux targets
 
@@ -86,12 +89,15 @@ is one argument after `--`; the remote command is a source-code constant and is
 never built from UI input:
 
 ```text
-/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin ss -H -n -O -a -t -u -p -e
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1; then docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
 ```
 
 The Linux host must provide an `ss` implementation with the fixed iproute2
-options shown above. Porto keeps sockets visible when an unprivileged account
-cannot see process metadata; names and Linux PIDs are informational only. No
+options shown above. Porto optionally reads published ports with `docker ps`
+when the configured SSH account can access Docker; containers without a
+published host port are not represented by that metadata. Ownerless non-Docker
+rows are hidden unless they match a published Docker port, while names and
+Linux PIDs remain informational only. No
 remote signal, `sudo`, `doas`, helper installation, configuration change, or
 privilege escalation is attempted.
 

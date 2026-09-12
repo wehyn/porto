@@ -46,6 +46,29 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.validRecords, 6)
     }
 
+    func testDockerPublishedPortReplacesUnknownProcessBeforeFiltering() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* ino:22
+        tcp LISTEN 0 128 0.0.0.0:53 0.0.0.0:* ino:53
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:8080
+        tcp ESTAB 0 0 192.0.2.10:8444 198.51.100.20:50000 ino:8444
+        __PORTO_DOCKER__
+        2b4f94051c6e\tpihole\t0.0.0.0:53->53/tcp
+        f4bacc4f39f8\tmoneyprinterturbo-api\t0.0.0.0:8080->8080/tcp
+        """
+        let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
+        let scanner = RemotePortScanner(host: host, runner: runner)
+        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 3, scanGeneration: 1, trigger: .manual)
+
+        let outcome = await scanner.scan(request)
+
+        guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [53, 8080])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · pihole", "Docker · moneyprinterturbo-api"])
+        XCTAssertTrue(snapshot.snapshot.connections.isEmpty)
+        XCTAssertEqual(snapshot.diagnostics.validRecords, 4)
+    }
+
     func testStatus255UnknownTextRemainsGenericTransportFailure() async {
         let runner = StubSSHCommandRunner(result: execution(stderr: Data("ssh: unknown failure\n".utf8), status: 255))
         let scanner = RemotePortScanner(host: host, runner: runner)
@@ -91,6 +114,40 @@ final class RemotePortScannerTests: XCTestCase {
             failure: nil,
             durationMilliseconds: 1
         )
+    }
+}
+
+final class DockerPortParserTests: XCTestCase {
+    func testParsesPublishedIPv4IPv6UDPAndRangesButSkipsInternalPorts() {
+        let output = """
+        one\tweb\t0.0.0.0:8080->8080/tcp, [::]:8080->8080/tcp
+        two\tgame\t0.0.0.0:19132->19132/udp, 0.0.0.0:25565-25566->25565-25566/tcp
+        three\tdatabase\t5432/tcp
+        """
+
+        let catalog = DockerPortParser().parse(output)
+
+        XCTAssertEqual(catalog.containerNames(localPort: 8080, transport: .tcp), ["web"])
+        XCTAssertEqual(catalog.containerNames(localPort: 19132, transport: .udp), ["game"])
+        XCTAssertTrue(catalog.contains(localPort: 25565, transport: .tcp))
+        XCTAssertTrue(catalog.contains(localPort: 25566, transport: .tcp))
+        XCTAssertFalse(catalog.contains(localPort: 5432, transport: .tcp))
+    }
+
+    func testMalformedRowsAndUnsafeNamesAreIgnored() {
+        let output = """
+        malformed
+        one\t\t0.0.0.0:8080->8080/tcp
+        two\tgood\t0.0.0.0:not-a-port->8080/tcp
+        three\tgood\t0.0.0.0:8081->8081/sctp
+        four\tgood\t0.0.0.0:8082->8082/tcp
+        """
+
+        let catalog = DockerPortParser().parse(output)
+
+        XCTAssertFalse(catalog.contains(localPort: 8080, transport: .tcp))
+        XCTAssertFalse(catalog.contains(localPort: 8081, transport: .tcp))
+        XCTAssertTrue(catalog.contains(localPort: 8082, transport: .tcp))
     }
 }
 

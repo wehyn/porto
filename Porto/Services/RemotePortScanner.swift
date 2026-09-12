@@ -3,7 +3,7 @@ import Foundation
 actor RemotePortScanner: PortSnapshotScanning {
     private let host: SSHHost
     private let runner: any SSHCommandRunning
-    private let parser: SsParser
+    private let outputParser: RemotePortOutputParser
     private let visibilityPolicy: PortVisibilityPolicy
 
     init(
@@ -14,7 +14,7 @@ actor RemotePortScanner: PortSnapshotScanning {
     ) {
         self.host = host
         self.runner = runner
-        self.parser = parser
+        self.outputParser = RemotePortOutputParser(ssParser: parser)
         self.visibilityPolicy = visibilityPolicy
     }
 
@@ -47,7 +47,7 @@ actor RemotePortScanner: PortSnapshotScanning {
         }
         guard !Task.isCancelled else { return .cancelled }
 
-        switch parser.parse(execution.stdout, targetID: request.targetID) {
+        switch outputParser.parse(execution.stdout, targetID: request.targetID) {
         case let .success(parsed):
             let diagnostics = ScanDiagnostics(
                 stdoutBytes: execution.stdout.count,
@@ -56,10 +56,11 @@ actor RemotePortScanner: PortSnapshotScanning {
                 skippedRecords: parsed.skippedRecords,
                 durationMilliseconds: execution.durationMilliseconds
             )
+            let dockerLabeledSnapshot = parsed.dockerPorts.applying(to: parsed.snapshot)
             return .success(TargetedPortSnapshot(
                 targetID: request.targetID,
                 sessionGeneration: request.sessionGeneration,
-                snapshot: visibilityPolicy.filtering(parsed.snapshot),
+                snapshot: visibilityPolicy.filtering(dockerLabeledSnapshot),
                 diagnostics: diagnostics
             ))
         case .failure:

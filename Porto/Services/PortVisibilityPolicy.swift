@@ -43,7 +43,7 @@ struct PortVisibilityPolicy: Sendable, Equatable {
             445,   // SMB
             5353   // mDNS
         ],
-        hiddenProcessNames: []
+        hiddenProcessNames: ["unknown process"]
     )
 
     func includes(_ group: ParsedPortGroup) -> Bool {
@@ -62,8 +62,10 @@ struct PortVisibilityPolicy: Sendable, Equatable {
     }
 
     private func includes(port: Int, processName: String) -> Bool {
-        !hiddenPorts.contains(port)
-            && !hiddenProcessNames.contains(Self.normalized(processName))
+        let normalizedName = Self.normalized(processName)
+        let isDocker = normalizedName.hasPrefix("docker · ")
+        return (isDocker || !hiddenPorts.contains(port))
+            && !hiddenProcessNames.contains(normalizedName)
     }
 
     private static func normalized(_ processName: String) -> String {

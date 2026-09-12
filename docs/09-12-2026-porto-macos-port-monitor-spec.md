@@ -150,7 +150,7 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 - This Mac is selected by default. A target change invalidates the old scan session before cancellation, cancels the old remote work, and starts one scan for the new target only after the old runner has released its child.
 - Remote status uses `Connecting over SSH…`, `Available over SSH · updated just now · read-only`, `Refreshing… · read-only`, and `Reconnecting… · showing in-memory results`. It must not say `SSH connected` while idle because scans use short-lived SSH children.
 - Remote rows show a lock/read-only treatment and expose no stop or force-kill action. This guard exists in the view, monitor, model, and terminator layers.
-- Remote snapshots hide common host-service ports (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) after parsing while retaining custom project ports. Diagnostics continue to report all valid records received from `ss`.
+- Remote snapshots hide common host-service ports (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) and ownerless non-Docker rows after parsing while retaining custom project ports. Published Docker ports are exempt from the common-port filter and labeled `Docker · <container>` using optional `docker ps` metadata. Diagnostics continue to report all valid records received from `ss`.
 - One successful snapshot is retained in memory per target until quit. A failure keeps that target's rows and marks them stale; a first failure shows an actionable retry without a false empty success.
 - A listener is evidence on the selected server, not a claim about reachability from another network or the public Internet. Missing Linux process metadata does not hide an otherwise valid socket.
 
@@ -290,7 +290,7 @@ and retains the prior catalog on a transient read failure.
 following arguments (the alias is passed after `--`):
 
 ```text
-/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin ss -H -n -O -a -t -u -p -e
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1; then docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
 ```
 
 The command and its environment are fixed except for inherited SSH settings
@@ -305,9 +305,11 @@ The parser supports numeric IPv4/IPv6, wildcard, loopback, and interface-
 qualified endpoints; TCP `LISTEN` and unconnected UDP are listeners, while
 remote-endpoint TCP/UDP rows are connections. Owner metadata is optional. A
 successful empty result is valid, and a successful remote row is always marked
-with its target origin and read-only state. Exit status 255 alone is a generic
-transport failure; bounded `LC_ALL=C` diagnostics may classify authentication,
-host-key, reachability, timeout, or missing/incompatible `ss` failures.
+with its target origin and read-only state. The optional Docker section maps
+published host ports to running container names without changing socket
+diagnostics. Exit status 255 alone is a generic transport failure; bounded
+`LC_ALL=C` diagnostics may classify authentication, host-key, reachability,
+timeout, or missing/incompatible `ss` failures.
 
 ## 8. Refresh and concurrency architecture
 
@@ -317,7 +319,7 @@ host-key, reachability, timeout, or missing/incompatible `ss` failures.
 - `PortScanner` is an injected `Sendable` service or actor for subprocess execution and parsing away from the main actor.
 - `LsofRunner` is the single serialized owner of every normal and targeted `lsof` child.
 - `SSHHostCatalog` reads the user's SSH configuration files with bounded, deterministic include traversal.
-- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed, read-only Linux `ss` query for the selected alias.
+- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed, read-only Linux `ss` query plus optional `docker ps` publication metadata for the selected alias.
 - `ProcessInspector` reads immutable process identity and existence.
 - `ProcessTerminator` coordinates validation and signaling away from the main actor.
 - `MenuPresentationObserver` reports actual popover presentation.

@@ -30,6 +30,8 @@ final class PortVisibilityPolicyTests: XCTestCase {
         for port in [22, 53, 80, 137, 443, 5353] {
             XCTAssertFalse(policy.includes(parsedGroup(port: port, processName: "service")), "port \(port) should be hidden")
         }
+        XCTAssertFalse(policy.includes(parsedGroup(port: 8080, processName: "Unknown process")))
+        XCTAssertTrue(policy.includes(parsedGroup(port: 80, processName: "Docker · pihole")))
         XCTAssertTrue(policy.includes(parsedGroup(port: 8080, processName: "my-remote-app")))
     }
 
