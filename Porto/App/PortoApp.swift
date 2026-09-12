@@ -11,11 +11,16 @@ struct PortoApp: App {
         let inspector = DarwinProcessInspector()
         let scanner = PortScanner(runner: runner, inspector: inspector)
         let terminator = ProcessTerminator(
-            scanner: scanner,
+            validator: scanner,
             inspector: inspector,
             signalSender: DarwinProcessSignalSender()
         )
-        _monitor = StateObject(wrappedValue: PortMonitor(scanner: scanner, terminator: terminator))
+        _monitor = StateObject(wrappedValue: PortMonitor(
+            localScanner: scanner,
+            terminator: terminator,
+            hostCatalog: SSHHostCatalog(),
+            remoteScannerFactory: { host in RemotePortScanner(host: host) }
+        ))
         _presentationObserver = StateObject(wrappedValue: MenuPresentationObserver())
     }
 
