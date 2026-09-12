@@ -31,6 +31,18 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertFalse(result.retainedPreviousCatalog)
     }
 
+    func testHidesGitHubKeyAndOrbStackLocalAliases() throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ssh = try makeSSHDirectory(in: home)
+        let config = "Host github.com ORB production orb-stack\n"
+        try Data(config.utf8).write(to: ssh.appendingPathComponent("config"))
+
+        let result = SSHHostCatalog(homeDirectory: home).load()
+
+        XCTAssertEqual(result.hosts.map(\.alias), ["orb-stack", "production"])
+    }
+
     func testMissingRootIsAnIntentionalEmptyCatalogAndDoesNotRetainPrior() throws {
         let home = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: home) }

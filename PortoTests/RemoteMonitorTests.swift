@@ -127,6 +127,24 @@ final class RemoteMonitorTests: XCTestCase {
         await waitUntil { await local.count() == 2 && !monitor.isScanning }
     }
 
+    func testGitHubKeyAndOrbStackAliasesAreNotRemoteTargets() throws {
+        let root = try makeSSHDirectory(hosts: ["github.com", "orb", "prod"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let monitor = PortMonitor(
+            localScanner: MonitorTestScanner(plans: []),
+            terminator: RecordingTerminator(),
+            hostCatalog: SSHHostCatalog(sshDirectory: root),
+            remoteScannerFactory: { _ in MonitorTestScanner(plans: []) },
+            clock: NeverMonitorClock()
+        )
+
+        XCTAssertEqual(monitor.sshHosts.map(\.alias), ["prod"])
+        XCTAssertEqual(
+            monitor.availableTargets,
+            [.local, .ssh(SSHHost(alias: "prod"))]
+        )
+    }
+
     func testBackoffScheduleIsBoundedAtThirtySeconds() {
         XCTAssertEqual(PortMonitor.backoffDelay(for: 1), .seconds(2))
         XCTAssertEqual(PortMonitor.backoffDelay(for: 2), .seconds(4))

@@ -93,7 +93,7 @@ struct PortPopoverView: View {
                 .foregroundStyle(monitor.remoteFailure == nil ? Color.secondary : Color.orange)
                 .fixedSize(horizontal: false, vertical: true)
             if monitor.sshHosts.isEmpty {
-                Text("Add a literal Host alias to ~/.ssh/config to inspect Linux over SSH.")
+                Text("Add a Linux Host alias to ~/.ssh/config to inspect a remote machine over SSH.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

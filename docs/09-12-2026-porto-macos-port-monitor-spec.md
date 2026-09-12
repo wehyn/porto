@@ -146,7 +146,7 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 
 ### 5.7 Target selection and remote Linux view
 
-- The target selector is placed under `WATCHING` and contains `This Mac` plus literal aliases read from `~/.ssh/config`. Aliases are discovered from files only; picker population never launches SSH or executes configuration helpers.
+- The target selector is placed under `WATCHING` and contains `This Mac` plus literal Linux aliases read from the user's `~/.ssh/config`. The key-only `github.com` entry and OrbStack's local-only `orb` alias are omitted. OrbStack host-published listeners belong to the This Mac scan while OrbStack is running and are absent when it is stopped. Aliases are discovered from files only; picker population never launches SSH or executes configuration helpers.
 - This Mac is selected by default. A target change invalidates the old scan session before cancellation, cancels the old remote work, and starts one scan for the new target only after the old runner has released its child.
 - Remote status uses `Connecting over SSH…`, `Available over SSH · updated just now · read-only`, `Refreshing… · read-only`, and `Reconnecting… · showing in-memory results`. It must not say `SSH connected` while idle because scans use short-lived SSH children.
 - Remote rows show a lock/read-only treatment and expose no stop or force-kill action. This guard exists in the view, monitor, model, and terminator layers.
@@ -280,11 +280,15 @@ The executable URL is fixed in code and never contains user-controlled text.
 
 ### 7.5 Remote scanner contract
 
-Remote inspection is enabled only for a selected literal SSH alias. `SSHHostCatalog`
-reads `~/.ssh/config` and bounded `Include` files without launching a process or
-opening a connection. It accepts safe literal aliases, ignores wildcards,
-negation, and `Match` blocks, sorts and de-duplicates them deterministically,
-and retains the prior catalog on a transient read failure.
+Remote inspection is enabled only for a selected literal Linux SSH alias.
+`SSHHostCatalog` reads `~/.ssh/config` and bounded `Include` files without
+launching a process or opening a connection. It accepts safe literal aliases,
+ignores wildcards, negation, and `Match` blocks, omits the key-only
+`github.com` entry and OrbStack's local-only `orb` alias, sorts and
+de-duplicates the remaining aliases deterministically, and retains the prior
+catalog on a transient read failure. OrbStack runs locally, so its published
+host listeners are observed by the This Mac scan only while OrbStack is
+running.
 
 `SSHCommandRunner` launches exactly one direct `/usr/bin/ssh` child with the
 following arguments (the alias is passed after `--`):

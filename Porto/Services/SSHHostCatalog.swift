@@ -71,7 +71,9 @@ struct SSHHostCatalog: Sendable {
             )
         }
 
-        let aliases = Self.sortedAndDeduplicated(state.aliases)
+        let aliases = Self.sortedAndDeduplicated(
+            state.aliases.filter { !Self.isHiddenAlias($0) }
+        )
         return SSHHostCatalogResult(
             hosts: aliases.map(SSHHost.init(alias:)),
             diagnostics: state.diagnostics,
@@ -349,6 +351,17 @@ struct SSHHostCatalog: Sendable {
             // SSH host names are case-insensitive. Use a locale-independent
             // fold for dedupe, while display ordering follows the product rule.
             seen.insert(asciiCaseFold(alias)).inserted
+        }
+    }
+
+    /// These entries are not user-selectable Linux targets. GitHub's host
+    /// entry is an authentication-key configuration, while OrbStack's
+    /// generated alias routes back into the local Mac and is represented by
+    /// the This Mac scan instead.
+    private static func isHiddenAlias(_ alias: String) -> Bool {
+        switch alias.lowercased() {
+        case "github.com", "orb": return true
+        default: return false
         }
     }
 
