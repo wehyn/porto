@@ -49,6 +49,10 @@ starts the first scan; while it remains visible, refreshes are requested every
 2 seconds. Closing it stops recurring scans. Use the overflow menu for About
 Porto and Quit Porto.
 
+The default view is developer-focused: it hides the legacy Xserve RAID port
+3722 and a small set of macOS infrastructure processes, while keeping custom
+project ports visible. Visible rows retain deterministic local-port ordering.
+
 ## Runtime acceptance
 
 On the accepted macOS environment, verify that the menu-bar icon is present,
