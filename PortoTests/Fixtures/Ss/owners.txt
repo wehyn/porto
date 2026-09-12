@@ -1,0 +1,5 @@
+tcp LISTEN 0 128 *:1001 *:* uid:1000 ino:1 sk:o1
+tcp LISTEN 0 128 *:1002 *:* users:(("single",pid=2,fd=3)) ino:2 sk:o2
+tcp LISTEN 0 128 *:1003 *:* users:(("comma, daemon",pid=3,fd=3),("second",pid=4,fd=4)) ino:3 sk:o3
+tcp LISTEN 0 128 *:1004 *:* users:(("quote\"daemon",pid=5,fd=3),("bad-pid",pid=nope,fd=4)) ino:4 sk:o4
+tcp LISTEN 0 128 *:1005 *:* users:(("truncated",pid=6,fd=3) ino:5 sk:o5

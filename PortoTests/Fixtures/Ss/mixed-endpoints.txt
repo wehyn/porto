@@ -1,0 +1,6 @@
+tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=101,fd=3)) uid:0 ino:100 sk:a1
+tcp LISTEN 0 4096 [::]:443 [::]:* users:(("nginx",pid=102,fd=6)) uid:33 ino:101 sk:a2
+tcp ESTAB 0 0 127.0.0.1:49152 127.0.0.1:443 users:(("client",pid=103,fd=7)) uid:1000 ino:102 sk:a3
+tcp TIME-WAIT 0 0 [2001:db8::1]:50000 [2001:db8::2]:80 timer:(timewait,12sec,0) uid:1000 ino:103 sk:a4
+udp UNCONN 0 0 *:68 *:* users:(("dhcp",pid=104,fd=4)) uid:0 ino:104 sk:a5
+udp UNCONN 0 0 [fe80::1%eth0]:5353 [::]:* users:(("mdns",pid=105,fd=8)) uid:1000 ino:105 sk:a6

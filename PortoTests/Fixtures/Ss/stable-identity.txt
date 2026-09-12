@@ -1,0 +1,4 @@
+tcp LISTEN 0 128 *:2001 *:* users:(("Owner",pid=20,fd=3)) ino:1 sk:s1
+tcp LISTEN 0 128 *:2002 *:* uid:1000 ino:2 sk:s2
+tcp LISTEN 0 128 *:2003 *:* uid:1000 ino:3
+tcp LISTEN 0 128 *:2004 *:* uid:1000
