@@ -43,10 +43,43 @@ enum SocketValidationResult: Sendable, Equatable {
     case failed(ScanFailure)
 }
 
-protocol PortScanning: Sendable {
-    func scan(generation: UInt64) async -> ScanOutcome
-    func validateSocket(for row: PortProcess) async -> SocketValidationResult
+protocol PortSnapshotScanning: Sendable {
+    func scan(_ request: PortScanRequest) async -> PortScanOutcome
     func cancelActiveWork() async
+}
+
+protocol LocalSocketValidating: Sendable {
+    func validateSocket(for row: PortProcess) async -> SocketValidationResult
+}
+
+// Compatibility composition for local-only callers. Remote scanners conform
+// only to PortSnapshotScanning, so they can never be used for termination.
+protocol PortScanning: PortSnapshotScanning, LocalSocketValidating {
+    func scan(generation: UInt64) async -> ScanOutcome
+}
+
+extension PortScanning {
+    func scan(_ request: PortScanRequest) async -> PortScanOutcome {
+        let outcome = await scan(generation: request.scanGeneration)
+        switch outcome {
+        case let .success(snapshot, diagnostics):
+            return .success(TargetedPortSnapshot(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                snapshot: snapshot,
+                diagnostics: diagnostics
+            ))
+        case let .failure(error, diagnostics):
+            return .failure(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                error: .local(error),
+                diagnostics: diagnostics
+            )
+        case .cancelled:
+            return .cancelled
+        }
+    }
 }
 
 actor PortScanner: PortScanning {
@@ -73,6 +106,8 @@ actor PortScanner: PortScanning {
         self.visibilityPolicy = visibilityPolicy
     }
 
+    // Kept as the local scan primitive so parser and runner tests can exercise
+    // local behavior independently of monitor target identity.
     func scan(generation: UInt64) async -> ScanOutcome {
         let execution = await runner.run(arguments: Self.normalArguments)
         let diagnosticsBase = ScanDiagnostics(
@@ -118,11 +153,12 @@ actor PortScanner: PortScanning {
     }
 
     func validateSocket(for row: PortProcess) async -> SocketValidationResult {
-        guard row.pid > 0, row.identity?.pid == row.pid else { return .identityChanged }
-        let execution = await runner.run(arguments: Self.targetedArguments(pid: row.pid))
+        guard let identity = row.localIdentity, identity.pid > 0 else { return .identityChanged }
+        let pid = identity.pid
+        let execution = await runner.run(arguments: Self.targetedArguments(pid: pid))
         if let failure = execution.failure {
             if failure == .cancelled { return .failed(.cancelled) }
-            if processIsGone(row.pid) { return .processExited }
+            if processIsGone(pid) { return .processExited }
             return .failed(map(failure))
         }
         guard let status = execution.terminationStatus else { return .failed(.cancelled) }
@@ -136,7 +172,7 @@ actor PortScanner: PortScanning {
             && execution.stderr.isEmpty
             && parsed.validRecords > 0
         if status != 0 && !noMatchExit && !parseableStatusOne {
-            if processIsGone(row.pid) { return .processExited }
+            if processIsGone(pid) { return .processExited }
             let failure: ScanFailure = dataContainsPermissionHint(execution.stderr)
                 ? .permissionDenied
                 : .nonZeroExit(status: status)
@@ -147,7 +183,7 @@ actor PortScanner: PortScanning {
         }
 
         let matchedGroup = parsed.groups.first { group in
-            group.key.pid == row.pid
+            group.key.pid == pid
                 && group.key.activityKind == row.activityKind
                 && group.key.transport == row.transport
                 && group.key.localPort == row.localPort
@@ -155,8 +191,8 @@ actor PortScanner: PortScanning {
         if let matchedGroup {
             return .matched(processName: matchedGroup.processName)
         }
-        if processIsGone(row.pid) { return .processExited }
-        if inspector.identity(for: row.pid) != row.identity { return .identityChanged }
+        if processIsGone(pid) { return .processExited }
+        if inspector.identity(for: pid) != identity { return .identityChanged }
         return .socketMissing
     }
 
@@ -184,8 +220,8 @@ actor PortScanner: PortScanning {
                     identity: identity,
                     scanGeneration: generation
                 ),
-                identity: identity,
-                pid: group.key.pid,
+                origin: identity.map(PortProcessOrigin.local)
+                    ?? .localUnverified(pid: group.key.pid),
                 localPort: group.key.localPort,
                 transport: group.key.transport,
                 processName: group.processName.isEmpty ? "Unknown process" : group.processName,

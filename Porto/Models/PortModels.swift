@@ -34,18 +34,82 @@ struct Endpoint: Hashable, Sendable, Codable {
     }
 }
 
+enum PortProcessOrigin: Hashable, Sendable, Codable {
+    case local(ProcessIdentity)
+    case localUnverified(pid: Int32)
+    case remote(targetID: PortTargetID, pid: Int32?)
+}
+
 struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let id: String
-    let identity: ProcessIdentity?
-    let pid: Int32
+    let origin: PortProcessOrigin
     let localPort: Int
     let transport: TransportProtocol
     let processName: String
     let endpoints: [Endpoint]
     let activityKind: PortActivityKind
 
+    init(
+        id: String,
+        origin: PortProcessOrigin,
+        localPort: Int,
+        transport: TransportProtocol,
+        processName: String,
+        endpoints: [Endpoint],
+        activityKind: PortActivityKind
+    ) {
+        self.id = id
+        self.origin = origin
+        self.localPort = localPort
+        self.transport = transport
+        self.processName = processName
+        self.endpoints = endpoints
+        self.activityKind = activityKind
+    }
+
+    init(
+        id: String,
+        identity: ProcessIdentity?,
+        pid: Int32,
+        localPort: Int,
+        transport: TransportProtocol,
+        processName: String,
+        endpoints: [Endpoint],
+        activityKind: PortActivityKind
+    ) {
+        self.init(
+            id: id,
+            origin: identity.map(PortProcessOrigin.local) ?? .localUnverified(pid: pid),
+            localPort: localPort,
+            transport: transport,
+            processName: processName,
+            endpoints: endpoints,
+            activityKind: activityKind
+        )
+    }
+
+    var localIdentity: ProcessIdentity? {
+        if case let .local(identity) = origin { return identity }
+        return nil
+    }
+
+    var identity: ProcessIdentity? { localIdentity }
+
+    var pid: Int32? {
+        switch origin {
+        case let .local(identity): identity.pid
+        case let .localUnverified(pid): pid
+        case let .remote(_, pid): pid
+        }
+    }
+
     var isActionable: Bool {
-        identity?.pid == pid
+        localIdentity != nil
+    }
+
+    var isRemote: Bool {
+        if case .remote = origin { return true }
+        return false
     }
 
     static func makeID(
@@ -209,7 +273,7 @@ struct PortProcessSort {
             if lhs.transport.sortOrder != rhs.transport.sortOrder {
                 return lhs.transport.sortOrder < rhs.transport.sortOrder
             }
-            if lhs.pid != rhs.pid { return lhs.pid < rhs.pid }
+            if lhs.pid != rhs.pid { return (lhs.pid ?? Int32.max) < (rhs.pid ?? Int32.max) }
             return lhs.id < rhs.id
         }
     }
