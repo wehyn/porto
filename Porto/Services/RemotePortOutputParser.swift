@@ -127,7 +127,8 @@ struct DockerPortCatalog: Equatable, Sendable {
             }
 
             let labeledRow = labeled(row, with: annotation)
-            guard annotation.containerIDs.count == 1,
+            guard !annotation.hasMissingContainerID,
+                  annotation.containerIDs.count == 1,
                   let targetID = Self.remoteTargetID(from: row.origin) else {
                 // Preserve the existing label behavior when metadata does not
                 // identify exactly one container, but do not merge by name.
@@ -187,7 +188,8 @@ struct DockerPortCatalog: Equatable, Sendable {
         guard !names.isEmpty else { return nil }
         return DockerRowAnnotation(
             containerIDs: Set(matchingBindings.compactMap(\.containerID)).sorted(),
-            containerNames: names
+            containerNames: names,
+            hasMissingContainerID: matchingBindings.contains { $0.containerID == nil }
         )
     }
 
@@ -278,6 +280,7 @@ struct DockerPortCatalog: Equatable, Sendable {
 private struct DockerRowAnnotation {
     let containerIDs: [String]
     let containerNames: [String]
+    let hasMissingContainerID: Bool
 }
 
 private struct DockerRowKey: Hashable {

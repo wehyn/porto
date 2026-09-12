@@ -218,6 +218,25 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · web", "Docker · web"])
     }
 
+    func testDockerMixedUsableAndMissingIDsRemainAtSocketGranularity() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:1 sk:one
+        tcp LISTEN 0 128 [::]:8080 [::]:* ino:2 sk:two
+        tcp LISTEN 0 128 0.0.0.0:9090 0.0.0.0:* ino:3 sk:three
+        __PORTO_DOCKER__
+        known-id\tweb\t8080->8080/tcp
+        \tweb\t8080->8080/tcp
+        known-id\tweb\t9090->9090/tcp
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 3)
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [8080, 8080, 9090])
+        XCTAssertEqual(snapshot.snapshot.listeners.filter { $0.localPort == 8080 }.map(\.localPorts), [[8080], [8080]])
+        XCTAssertEqual(snapshot.snapshot.listeners.last?.localPorts, [9090])
+    }
+
     func testDockerLabelsOnlyMatchingListenerAddressAndNeverConnections() async throws {
         let output = """
         tcp LISTEN 0 128 127.0.0.1:8080 127.0.0.1:* ino:1
