@@ -42,7 +42,7 @@ actor SSHCommandRunner: SSHCommandRunning {
     static let stdoutLimit = 16 * 1024 * 1024
     static let stderrLimit = 256 * 1024
     static let timeout: Duration = .seconds(5)
-    static let remoteCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1; then docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
+    static let remoteCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
 
     private static let fixedArguments = [
         "-T",

@@ -69,6 +69,25 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.validRecords, 4)
     }
 
+    func testDockerLabelsOnlyMatchingListenerAddressAndNeverConnections() async throws {
+        let output = """
+        tcp LISTEN 0 128 127.0.0.1:8080 127.0.0.1:* ino:1
+        tcp LISTEN 0 128 192.0.2.10:8080 192.0.2.10:* users:(("other",pid=2,fd=3)) ino:2
+        tcp ESTAB 0 0 192.0.2.10:8080 198.51.100.20:50000 users:(("client",pid=3,fd=4)) ino:3
+        __PORTO_DOCKER__
+        2b4f94051c6e\tweb\t127.0.0.1:8080->8080/tcp
+        """
+        let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
+        let scanner = RemotePortScanner(host: host, runner: runner)
+        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 4, scanGeneration: 1, trigger: .manual)
+
+        let outcome = await scanner.scan(request)
+
+        guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · web", "other"])
+        XCTAssertEqual(snapshot.snapshot.connections.map(\.processName), ["client"])
+    }
+
     func testStatus255UnknownTextRemainsGenericTransportFailure() async {
         let runner = StubSSHCommandRunner(result: execution(stderr: Data("ssh: unknown failure\n".utf8), status: 255))
         let scanner = RemotePortScanner(host: host, runner: runner)
@@ -132,6 +151,12 @@ final class DockerPortParserTests: XCTestCase {
         XCTAssertTrue(catalog.contains(localPort: 25565, transport: .tcp))
         XCTAssertTrue(catalog.contains(localPort: 25566, transport: .tcp))
         XCTAssertFalse(catalog.contains(localPort: 5432, transport: .tcp))
+    }
+
+    func testParsesPublishedHostPortWithoutAddress() {
+        let catalog = DockerPortParser().parse("one\tweb\t8080->8080/tcp")
+
+        XCTAssertEqual(catalog.containerNames(localPort: 8080, transport: .tcp), ["web"])
     }
 
     func testMalformedRowsAndUnsafeNamesAreIgnored() {

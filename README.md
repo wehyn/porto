@@ -89,15 +89,17 @@ is one argument after `--`; the remote command is a source-code constant and is
 never built from UI input:
 
 ```text
-/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1; then docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
 ```
 
 The Linux host must provide an `ss` implementation with the fixed iproute2
-options shown above. Porto optionally reads published ports with `docker ps`
-when the configured SSH account can access Docker; containers without a
-published host port are not represented by that metadata. Ownerless non-Docker
-rows are hidden unless they match a published Docker port, while names and
-Linux PIDs remain informational only. No
+options shown above. Porto optionally reads published ports with a bounded
+`docker ps` query when the configured SSH account can access both Docker and
+the existing `timeout` utility; containers without a published host port are
+not represented by that metadata. A Docker metadata timeout or failure never
+changes the `ss` result. Ownerless non-Docker rows are hidden unless they match
+a published Docker port, while names and Linux PIDs remain informational only.
+No
 remote signal, `sudo`, `doas`, helper installation, configuration change, or
 privilege escalation is attempted.
 

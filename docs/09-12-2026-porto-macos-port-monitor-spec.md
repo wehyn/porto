@@ -290,7 +290,7 @@ and retains the prior catalog on a transient read failure.
 following arguments (the alias is passed after `--`):
 
 ```text
-/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1; then docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
 ```
 
 The command and its environment are fixed except for inherited SSH settings
@@ -307,7 +307,9 @@ remote-endpoint TCP/UDP rows are connections. Owner metadata is optional. A
 successful empty result is valid, and a successful remote row is always marked
 with its target origin and read-only state. The optional Docker section maps
 published host ports to running container names without changing socket
-diagnostics. Exit status 255 alone is a generic transport failure; bounded
+diagnostics. The Docker query is bounded and is skipped when `timeout` is
+unavailable; a Docker failure never replaces a successful `ss` result. Exit
+status 255 alone is a generic transport failure; bounded
 `LC_ALL=C` diagnostics may classify authentication, host-key, reachability,
 timeout, or missing/incompatible `ss` failures.
 

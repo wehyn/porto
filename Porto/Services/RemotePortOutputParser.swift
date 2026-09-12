@@ -62,6 +62,7 @@ struct RemotePortOutputParser: Sendable {
 struct DockerPortBinding: Hashable, Sendable {
     let localPort: Int
     let transport: TransportProtocol
+    let hostAddress: String?
     let containerName: String
 }
 
@@ -82,17 +83,31 @@ struct DockerPortCatalog: Equatable, Sendable {
         ).sorted()
     }
 
+    private func containerNames(for row: PortProcess) -> [String] {
+        guard row.activityKind == .listener else { return [] }
+        let localAddresses = Set(row.endpoints.compactMap(Self.localAddress(from:)))
+        return Set(
+            bindings
+                .filter {
+                    $0.localPort == row.localPort
+                        && $0.transport == row.transport
+                        && Self.bindingMatches($0, localAddresses: localAddresses)
+                }
+                .map(\.containerName)
+        ).sorted()
+    }
+
     /// Labels rows backed by a published Docker host port before visibility
     /// filtering hides ownerless non-Docker rows.
     func applying(to snapshot: PortSnapshot) -> PortSnapshot {
         PortSnapshot(
-            listeners: snapshot.listeners.map { applying(to: $0) },
-            connections: snapshot.connections.map { applying(to: $0) }
+            listeners: PortProcessSort.sort(snapshot.listeners.map { applying(to: $0) }),
+            connections: PortProcessSort.sort(snapshot.connections.map { applying(to: $0) })
         )
     }
 
     private func applying(to row: PortProcess) -> PortProcess {
-        let names = containerNames(localPort: row.localPort, transport: row.transport)
+        let names = containerNames(for: row)
         guard !names.isEmpty else { return row }
         return PortProcess(
             id: row.id,
@@ -103,6 +118,41 @@ struct DockerPortCatalog: Equatable, Sendable {
             endpoints: row.endpoints,
             activityKind: row.activityKind
         )
+    }
+
+    private static func bindingMatches(
+        _ binding: DockerPortBinding,
+        localAddresses: Set<String>
+    ) -> Bool {
+        guard let hostAddress = binding.hostAddress else { return true }
+        return localAddresses.contains(hostAddress)
+    }
+
+    private static func localAddress(from endpoint: Endpoint) -> String? {
+        let localComponent: String
+        if let arrow = endpoint.rawValue.range(of: "->") {
+            localComponent = String(endpoint.rawValue[..<arrow.lowerBound])
+        } else {
+            localComponent = endpoint.rawValue
+        }
+        guard let separator = localComponent.lastIndex(of: ":") else { return nil }
+        let host = String(localComponent[..<separator])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty else { return nil }
+        return canonicalAddress(host)
+    }
+
+    private static func canonicalAddress(_ address: String) -> String {
+        var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.first == "[", value.last == "]" {
+            value.removeFirst()
+            value.removeLast()
+        }
+        switch value {
+        case "*", "0.0.0.0": return "ipv4-wildcard"
+        case "::": return "ipv6-wildcard"
+        default: return value
+        }
     }
 }
 
@@ -142,13 +192,23 @@ struct DockerPortParser: Sendable {
             default: continue
             }
 
-            guard let portSeparator = hostEndpoint.lastIndex(of: ":") else { continue }
-            let hostPortText = hostEndpoint[hostEndpoint.index(after: portSeparator)...]
+            let hostAddress: String?
+            let hostPortText: Substring
+            if let portSeparator = hostEndpoint.lastIndex(of: ":") {
+                let rawHostAddress = String(hostEndpoint[..<portSeparator])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                hostAddress = rawHostAddress.isEmpty ? nil : Self.canonicalAddress(rawHostAddress)
+                hostPortText = hostEndpoint[hostEndpoint.index(after: portSeparator)...]
+            } else {
+                hostAddress = nil
+                hostPortText = Substring(hostEndpoint)
+            }
             guard let portRange = parsePortRange(String(hostPortText)) else { continue }
             for port in portRange {
                 bindings.insert(DockerPortBinding(
                     localPort: port,
                     transport: transport,
+                    hostAddress: hostAddress,
                     containerName: containerName
                 ))
             }
@@ -173,5 +233,18 @@ struct DockerPortParser: Sendable {
             return nil
         }
         return String(trimmed.prefix(Self.maximumContainerNameLength))
+    }
+
+    private static func canonicalAddress(_ address: String) -> String {
+        var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.first == "[", value.last == "]" {
+            value.removeFirst()
+            value.removeLast()
+        }
+        switch value {
+        case "*", "0.0.0.0": return "ipv4-wildcard"
+        case "::": return "ipv6-wildcard"
+        default: return value
+        }
     }
 }
