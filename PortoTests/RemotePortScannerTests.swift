@@ -25,6 +25,27 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(aliases, ["prod"])
     }
 
+    func testRemotePolicyHidesCommonServicePortsButKeepsCustomPorts() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* ino:22
+        udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:* ino:53
+        tcp LISTEN 0 128 0.0.0.0:80 0.0.0.0:* ino:80
+        tcp LISTEN 0 128 0.0.0.0:137 0.0.0.0:* ino:137
+        tcp ESTAB 0 0 192.0.2.10:443 198.51.100.20:50000 ino:443
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"app\",pid=8080,fd=3)) ino:8080
+        """
+        let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
+        let scanner = RemotePortScanner(host: host, runner: runner)
+        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 2, scanGeneration: 1, trigger: .manual)
+
+        let outcome = await scanner.scan(request)
+
+        guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [8080])
+        XCTAssertTrue(snapshot.snapshot.connections.isEmpty)
+        XCTAssertEqual(snapshot.diagnostics.validRecords, 6)
+    }
+
     func testStatus255UnknownTextRemainsGenericTransportFailure() async {
         let runner = StubSSHCommandRunner(result: execution(stderr: Data("ssh: unknown failure\n".utf8), status: 255))
         let scanner = RemotePortScanner(host: host, runner: runner)

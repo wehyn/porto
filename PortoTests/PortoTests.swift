@@ -24,6 +24,15 @@ final class PortVisibilityPolicyTests: XCTestCase {
         XCTAssertTrue(policy.includes(parsedGroup(port: 45678, processName: "my-local-app")))
     }
 
+    func testRemotePolicyHidesCommonServicePortsButKeepsCustomPortsVisible() {
+        let policy = PortVisibilityPolicy.remoteFocused
+
+        for port in [22, 53, 80, 137, 443, 5353] {
+            XCTAssertFalse(policy.includes(parsedGroup(port: port, processName: "service")), "port \(port) should be hidden")
+        }
+        XCTAssertTrue(policy.includes(parsedGroup(port: 8080, processName: "my-remote-app")))
+    }
+
     private func parsedGroup(port: Int, processName: String) -> ParsedPortGroup {
         ParsedPortGroup(
             key: PreliminaryGroupKey(

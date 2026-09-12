@@ -54,9 +54,11 @@ Porto and Quit Porto.
 
 The default view is developer-focused for This Mac: it hides known macOS
 infrastructure plus Zen and Discord helper processes by name, while keeping
-custom project ports visible. Remote targets show every valid row because the
-local hidden-process policy does not apply to another machine. Listeners and
-active connections appear together in one list, sorted by local port.
+custom project ports visible. Remote targets hide common host-service ports
+(22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) while keeping custom
+project ports visible; the filter is applied after parsing, so scan diagnostics
+still account for every valid remote record. Listeners and active connections
+appear together in one list, sorted by local port.
 
 ## Remote Linux targets
 

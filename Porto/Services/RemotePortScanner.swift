@@ -4,15 +4,18 @@ actor RemotePortScanner: PortSnapshotScanning {
     private let host: SSHHost
     private let runner: any SSHCommandRunning
     private let parser: SsParser
+    private let visibilityPolicy: PortVisibilityPolicy
 
     init(
         host: SSHHost,
         runner: any SSHCommandRunning = SSHCommandRunner(),
-        parser: SsParser = SsParser()
+        parser: SsParser = SsParser(),
+        visibilityPolicy: PortVisibilityPolicy = .remoteFocused
     ) {
         self.host = host
         self.runner = runner
         self.parser = parser
+        self.visibilityPolicy = visibilityPolicy
     }
 
     func scan(_ request: PortScanRequest) async -> PortScanOutcome {
@@ -56,7 +59,7 @@ actor RemotePortScanner: PortSnapshotScanning {
             return .success(TargetedPortSnapshot(
                 targetID: request.targetID,
                 sessionGeneration: request.sessionGeneration,
-                snapshot: parsed.snapshot,
+                snapshot: visibilityPolicy.filtering(parsed.snapshot),
                 diagnostics: diagnostics
             ))
         case .failure:

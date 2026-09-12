@@ -34,7 +34,7 @@ V1 is acceptable only when all of the following are true:
 
 - Opening Porto immediately starts a scan and presents current rows, a first-load state, or an actionable scan error.
 - All visible listener and connection rows appear in one unified list with no category disclosure controls.
-- This Mac remains the default target; a selected remote target shows all valid rows and marks them read-only.
+- This Mac remains the default target; a selected remote target hides configured common host-service ports, retains other valid rows, and marks visible rows read-only.
 - Results refresh every 2 seconds while the popover is open and do not refresh while it is closed.
 - There is never more than one Porto-owned local `lsof` or remote SSH scan child in flight.
 - Normal stop never sends SIGKILL. Force Kill is unavailable until SIGTERM has failed to end the revalidated process within the defined grace period.
@@ -150,6 +150,7 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 - This Mac is selected by default. A target change invalidates the old scan session before cancellation, cancels the old remote work, and starts one scan for the new target only after the old runner has released its child.
 - Remote status uses `Connecting over SSH…`, `Available over SSH · updated just now · read-only`, `Refreshing… · read-only`, and `Reconnecting… · showing in-memory results`. It must not say `SSH connected` while idle because scans use short-lived SSH children.
 - Remote rows show a lock/read-only treatment and expose no stop or force-kill action. This guard exists in the view, monitor, model, and terminator layers.
+- Remote snapshots hide common host-service ports (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) after parsing while retaining custom project ports. Diagnostics continue to report all valid records received from `ss`.
 - One successful snapshot is retained in memory per target until quit. A failure keeps that target's rows and marks them stale; a first failure shows an actionable retry without a false empty success.
 - A listener is evidence on the selected server, not a claim about reachability from another network or the public Internet. Missing Linux process metadata does not hide an otherwise valid socket.
 
