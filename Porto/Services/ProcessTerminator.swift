@@ -37,37 +37,53 @@ protocol ProcessTerminating: Sendable {
 }
 
 actor ProcessTerminator: ProcessTerminating {
-    private let scanner: any PortScanning
+    private let validator: any LocalSocketValidating
     private let inspector: any ProcessInspecting
     private let signalSender: any ProcessSignaling
     private let clock: any MonitorSleeping
     private let ownPID: Int32
 
     init(
-        scanner: any PortScanning,
+        validator: any LocalSocketValidating,
         inspector: any ProcessInspecting,
         signalSender: any ProcessSignaling,
         clock: any MonitorSleeping = SystemMonitorClock(),
         ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier)
     ) {
-        self.scanner = scanner
+        self.validator = validator
         self.inspector = inspector
         self.signalSender = signalSender
         self.clock = clock
         self.ownPID = ownPID
     }
 
+    init(
+        scanner: any LocalSocketValidating,
+        inspector: any ProcessInspecting,
+        signalSender: any ProcessSignaling,
+        clock: any MonitorSleeping = SystemMonitorClock(),
+        ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier)
+    ) {
+        self.init(
+            validator: scanner,
+            inspector: inspector,
+            signalSender: signalSender,
+            clock: clock,
+            ownPID: ownPID
+        )
+    }
+
     func stop(row: PortProcess) async -> TerminationOutcome {
-        guard row.pid != ownPID, let identity = row.identity, identity.pid == row.pid else {
+        guard let identity = row.localIdentity, identity.pid != ownPID else {
             return .failed(.staleTarget)
         }
 
-        guard let beforeValidation = inspector.identity(for: row.pid) else {
+        guard let beforeValidation = inspector.identity(for: identity.pid) else {
             return .exited
         }
         guard beforeValidation == identity else { return .failed(.staleTarget) }
 
-        switch await scanner.validateSocket(for: row) {
+        switch await validator.validateSocket(for: row) {
         case .processExited:
             return .exited
         case .identityChanged, .socketMissing:
@@ -78,16 +94,16 @@ actor ProcessTerminator: ProcessTerminating {
             guard processName == row.processName else { return .failed(.staleTarget) }
         }
 
-        guard let afterValidation = inspector.identity(for: row.pid) else {
+        guard let afterValidation = inspector.identity(for: identity.pid) else {
             return .exited
         }
         guard afterValidation == identity else { return .failed(.staleTarget) }
-        guard let currentName = inspector.processName(for: row.pid), currentName == row.processName else {
+        guard let currentName = inspector.processName(for: identity.pid), currentName == row.processName else {
             return .failed(.staleTarget)
         }
         guard !Task.isCancelled else { return .cancelled }
 
-        switch signalSender.send(signal: SIGTERM, to: row.pid) {
+        switch signalSender.send(signal: SIGTERM, to: identity.pid) {
         case .sent:
             return await waitForExit(identity: identity, checks: 20)
         case let .failed(errno, description):
@@ -96,16 +112,16 @@ actor ProcessTerminator: ProcessTerminating {
     }
 
     func forceKill(row: PortProcess) async -> TerminationOutcome {
-        guard row.pid != ownPID, let identity = row.identity, identity.pid == row.pid else {
+        guard let identity = row.localIdentity, identity.pid != ownPID else {
             return .failed(.staleTarget)
         }
 
-        guard let beforeValidation = inspector.identity(for: row.pid) else {
+        guard let beforeValidation = inspector.identity(for: identity.pid) else {
             return .exited
         }
         guard beforeValidation == identity else { return .failed(.staleTarget) }
 
-        switch await scanner.validateSocket(for: row) {
+        switch await validator.validateSocket(for: row) {
         case .processExited:
             return .exited
         case .identityChanged, .socketMissing:
@@ -116,16 +132,16 @@ actor ProcessTerminator: ProcessTerminating {
             guard processName == row.processName else { return .failed(.staleTarget) }
         }
 
-        guard let afterValidation = inspector.identity(for: row.pid) else {
+        guard let afterValidation = inspector.identity(for: identity.pid) else {
             return .exited
         }
         guard afterValidation == identity else { return .failed(.staleTarget) }
-        guard let currentName = inspector.processName(for: row.pid), currentName == row.processName else {
+        guard let currentName = inspector.processName(for: identity.pid), currentName == row.processName else {
             return .failed(.staleTarget)
         }
         guard !Task.isCancelled else { return .cancelled }
 
-        switch signalSender.send(signal: SIGKILL, to: row.pid) {
+        switch signalSender.send(signal: SIGKILL, to: identity.pid) {
         case .sent:
             return await waitForExit(identity: identity, checks: 10, forceKill: true)
         case let .failed(errno, description):

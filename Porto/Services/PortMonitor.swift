@@ -4,6 +4,8 @@ import Foundation
 
 @MainActor
 final class PortMonitor: ObservableObject {
+    typealias RemoteScannerFactory = @MainActor (SSHHost) -> any PortSnapshotScanning
+
     @Published private(set) var listenerRows: [PortProcess] = []
     @Published private(set) var connectionRows: [PortProcess] = []
     @Published private(set) var isScanning = false
@@ -11,15 +13,25 @@ final class PortMonitor: ObservableObject {
     @Published private(set) var hasSnapshot = false
     @Published private(set) var isStale = false
     @Published private(set) var scanError: ScanFailure?
+    @Published private(set) var remoteFailure: RemoteScanFailure?
     @Published private(set) var lastDiagnostics: ScanDiagnostics?
     @Published private(set) var terminationStates: [ProcessIdentity: TerminationUIState] = [:]
     @Published private(set) var forceKillPrompt: PortProcess?
+    @Published private(set) var sshHosts: [SSHHost] = []
+    @Published private(set) var catalogDiagnostics: [SSHHostCatalogDiagnostic] = []
+    @Published private(set) var selectedTarget: PortTarget = .local
+    @Published var connectionsExpanded = false
+    @Published private(set) var nextRetrySeconds: Int?
 
-    private let scanner: any PortScanning
+    private let localScanner: any PortSnapshotScanning
     private let terminator: any ProcessTerminating
     private let ownPID: Int32
     private let clock: any MonitorSleeping
-    private var refreshTask: Task<Void, Never>?
+    private let hostCatalog: SSHHostCatalog?
+    private let remoteScannerFactory: RemoteScannerFactory?
+    private var activeScanner: (any PortSnapshotScanning)?
+    private var targetStates: [PortTargetID: TargetMonitorState] = [:]
+    private var scheduleTask: Task<Void, Never>?
     private var scanTask: Task<Void, Never>?
     private var scanToken: UUID?
     private var terminationTask: Task<Void, Never>?
@@ -34,81 +46,135 @@ final class PortMonitor: ObservableObject {
     private var quitRequested = false
 
     init(
+        localScanner: any PortSnapshotScanning,
+        terminator: any ProcessTerminating,
+        hostCatalog: SSHHostCatalog,
+        remoteScannerFactory: @escaping RemoteScannerFactory,
+        ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier),
+        clock: any MonitorSleeping = SystemMonitorClock()
+    ) {
+        self.localScanner = localScanner
+        self.terminator = terminator
+        self.hostCatalog = hostCatalog
+        self.remoteScannerFactory = remoteScannerFactory
+        self.ownPID = ownPID
+        self.clock = clock
+        self.activeScanner = localScanner
+        reloadHostCatalog()
+    }
+
+    init(
         scanner: any PortScanning,
         terminator: any ProcessTerminating,
         ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier),
         clock: any MonitorSleeping = SystemMonitorClock()
     ) {
-        self.scanner = scanner
+        self.localScanner = scanner
         self.terminator = terminator
+        self.hostCatalog = nil
+        self.remoteScannerFactory = nil
         self.ownPID = ownPID
         self.clock = clock
+        self.activeScanner = scanner
     }
 
     var isPopoverPresented: Bool { isPresented }
+    var allRows: [PortProcess] { PortProcessSort.sort(listenerRows + connectionRows) }
+    var isRemoteTarget: Bool { selectedTarget.isRemote }
+    var isTargetPickerDisabled: Bool { activeTerminationIdentity != nil || forceKillPrompt != nil }
+    var availableTargets: [PortTarget] { [.local] + sshHosts.map(PortTarget.ssh) }
 
-    var allRows: [PortProcess] {
-        PortProcessSort.sort(listenerRows + connectionRows)
+    var targetStatusText: String {
+        if !isRemoteTarget {
+            if isScanning && !hasSnapshot { return "Scanning This Mac…" }
+            if isScanning { return "Refreshing…" }
+            return "Local inspection"
+        }
+        if isScanning && !hasSnapshot { return "Connecting over SSH… · read-only" }
+        if isScanning { return isStale ? "Reconnecting… · showing in-memory results" : "Refreshing… · read-only" }
+        if let remoteFailure {
+            var message = remoteFailure.userMessage + (hasSnapshot ? " Showing last results." : "")
+            if let nextRetrySeconds { message += " Retrying in " + String(nextRetrySeconds) + "s." }
+            return message
+        }
+        if hasSnapshot { return "Available over SSH · updated just now · read-only" }
+        return "Ready to connect · read-only"
     }
 
     func setPresented(_ presented: Bool) {
         guard isPresented != presented else { return }
         isPresented = presented
         sessionGeneration &+= 1
-
+        scheduleTask?.cancel()
+        scheduleTask = nil
+        nextRetrySeconds = nil
         if presented {
+            connectionsExpanded = false
+            reloadHostCatalog()
             pendingRefresh = false
             pendingManualRefresh = false
             isManualRefreshing = false
-            startRefreshLoop()
-            requestRefresh()
+            publishSelectedTargetState()
+            requestRefresh(trigger: .presentation)
         } else {
-            refreshTask?.cancel()
-            refreshTask = nil
             pendingRefresh = false
             pendingManualRefresh = false
             isManualRefreshing = false
             forceKillPrompt = nil
             scanTask?.cancel()
-            // Keep scanToken until its cancellation cleanup completes. A new
-            // presentation must not start a second lsof child beside the old one.
+            let scanner = activeScanner
+            Task { await scanner?.cancelActiveWork() }
         }
     }
 
-    func refresh() {
-        requestRefresh(isManual: true)
+    func selectTarget(_ target: PortTarget) {
+        switchTarget(target)
     }
 
-    func retry() {
-        requestRefresh(isManual: true)
+    private func switchTarget(_ target: PortTarget, bypassPicker: Bool = false) {
+        guard target != selectedTarget,
+              (bypassPicker || !isTargetPickerDisabled),
+              availableTargets.contains(target) else { return }
+        sessionGeneration &+= 1
+        selectedTarget = target
+        scheduleTask?.cancel()
+        scheduleTask = nil
+        nextRetrySeconds = nil
+        pendingRefresh = true
+        pendingManualRefresh = false
+        isManualRefreshing = false
+        let previousScanner = activeScanner
+        activeScanner = scanner(for: target)
+        publishSelectedTargetState()
+        scanTask?.cancel()
+        Task { [weak self] in
+            await previousScanner?.cancelActiveWork()
+            guard let self, self.isPresented else { return }
+            self.drainPendingRefreshIfPossible(trigger: .targetChange)
+        }
     }
+
+    func refresh() { requestRefresh(isManual: true, trigger: .manual) }
+    func retry() { requestRefresh(isManual: true, trigger: .manual) }
 
     func terminationState(for row: PortProcess) -> TerminationUIState? {
-        guard let identity = row.identity else { return nil }
+        guard let identity = row.localIdentity else { return nil }
         return terminationStates[identity]
     }
 
-    func isOwnProcess(_ row: PortProcess) -> Bool {
-        row.pid == ownPID
-    }
+    func isOwnProcess(_ row: PortProcess) -> Bool { row.localIdentity?.pid == ownPID }
 
     func isTerminationDisabled(for row: PortProcess) -> Bool {
-        guard row.isActionable, !isOwnProcess(row) else { return true }
-        guard let identity = row.identity else { return true }
+        guard let identity = row.localIdentity, identity.pid != ownPID else { return true }
         if case .inProgress? = terminationStates[identity] { return true }
         if let activeTerminationIdentity, activeTerminationIdentity != identity { return true }
         return false
     }
 
     func requestStop(for row: PortProcess) {
-        guard isPresented,
-              row.isActionable,
-              !isOwnProcess(row),
-              let identity = row.identity,
-              activeTerminationIdentity == nil else { return }
-
+        guard isPresented, let identity = row.localIdentity, identity.pid != ownPID, activeTerminationIdentity == nil else { return }
         pendingRefresh = true
-        scanTask?.cancel()
+        cancelActiveScan()
         activeTerminationIdentity = identity
         let token = UUID()
         terminationToken = token
@@ -121,26 +187,21 @@ final class PortMonitor: ObservableObject {
                 self.finishTermination(.cancelled, identity: identity, token: token)
                 return
             }
-            let outcome = await terminator.stop(row: row)
-            self.finishTermination(outcome, identity: identity, token: token)
+            self.finishTermination(await terminator.stop(row: row), identity: identity, token: token)
         }
     }
 
     func requestForceKill(for row: PortProcess) {
-        guard isPresented,
-              let identity = row.identity,
+        guard isPresented, let identity = row.localIdentity,
               terminationStates[identity] == .forceKillAvailable,
               activeTerminationIdentity == nil else { return }
         forceKillPrompt = row
     }
 
-    func cancelForceKillPrompt() {
-        forceKillPrompt = nil
-    }
+    func cancelForceKillPrompt() { forceKillPrompt = nil }
 
     func confirmForceKill() {
-        guard let row = forceKillPrompt,
-              let identity = row.identity,
+        guard let row = forceKillPrompt, let identity = row.localIdentity,
               terminationStates[identity] == .forceKillAvailable,
               activeTerminationIdentity == nil else {
             forceKillPrompt = nil
@@ -148,7 +209,7 @@ final class PortMonitor: ObservableObject {
         }
         forceKillPrompt = nil
         pendingRefresh = true
-        scanTask?.cancel()
+        cancelActiveScan()
         activeTerminationIdentity = identity
         let token = UUID()
         terminationToken = token
@@ -161,188 +222,215 @@ final class PortMonitor: ObservableObject {
                 self.finishTermination(.cancelled, identity: identity, token: token)
                 return
             }
-            let outcome = await terminator.forceKill(row: row)
-            self.finishTermination(outcome, identity: identity, token: token)
+            self.finishTermination(await terminator.forceKill(row: row), identity: identity, token: token)
         }
     }
 
     func quitApplication() {
         guard !quitRequested else { return }
         quitRequested = true
-        refreshTask?.cancel()
-        refreshTask = nil
+        sessionGeneration &+= 1
+        scheduleTask?.cancel()
+        nextRetrySeconds = nil
         scanTask?.cancel()
         terminationTask?.cancel()
         pendingManualRefresh = false
         isManualRefreshing = false
-        let scanner = self.scanner
-        Task { [weak self] in
-            await scanner.cancelActiveWork()
-            // LsofRunner's cancellation contract gives a child 500 ms to exit
-            // before it is force-killed. Keep the app alive for that cleanup.
+        let scanner = activeScanner
+        Task {
+            await scanner?.cancelActiveWork()
             try? await Task.sleep(for: .milliseconds(600))
-            guard self != nil else { return }
             NSApplication.shared.terminate(nil)
         }
     }
 
-    private func requestRefresh(isManual: Bool = false) {
+    private func scanner(for target: PortTarget) -> any PortSnapshotScanning {
+        switch target {
+        case .local: localScanner
+        case let .ssh(host): remoteScannerFactory?(host) ?? localScanner
+        }
+    }
+
+    private func reloadHostCatalog() {
+        guard let hostCatalog else { return }
+        let result = hostCatalog.load(previous: sshHosts)
+        sshHosts = result.hosts
+        catalogDiagnostics = result.diagnostics
+        if case let .ssh(selectedHost) = selectedTarget, !sshHosts.contains(selectedHost) {
+            switchTarget(.local, bypassPicker: true)
+        }
+    }
+
+    private func publishSelectedTargetState() {
+        let state = targetStates[selectedTarget.id] ?? .empty
+        listenerRows = state.snapshot?.listeners ?? []
+        connectionRows = state.snapshot?.connections ?? []
+        hasSnapshot = state.snapshot != nil
+        isStale = state.snapshot != nil && selectedTarget.isRemote
+        lastDiagnostics = state.diagnostics
+        if case let .local(error)? = state.failure { scanError = error } else { scanError = nil }
+        if case let .remote(error)? = state.failure { remoteFailure = error } else { remoteFailure = nil }
+    }
+
+    private func requestRefresh(isManual: Bool = false, trigger: ScanTrigger = .scheduled) {
         guard isPresented, !quitRequested else { return }
+        scheduleTask?.cancel()
+        scheduleTask = nil
+        nextRetrySeconds = nil
         pendingRefresh = true
         if isManual {
             pendingManualRefresh = true
             isManualRefreshing = true
         }
-        guard activeTerminationIdentity == nil, scanToken == nil else { return }
+        drainPendingRefreshIfPossible(trigger: trigger)
+    }
+
+    private func drainPendingRefreshIfPossible(trigger: ScanTrigger = .scheduled) {
+        guard isPresented, !quitRequested, pendingRefresh,
+              activeTerminationIdentity == nil, scanToken == nil else { return }
         pendingRefresh = false
-        let shouldStartManualRefresh = pendingManualRefresh
+        let manual = pendingManualRefresh
         pendingManualRefresh = false
-        startScan(isManual: shouldStartManualRefresh)
+        startScan(isManual: manual, trigger: manual ? .manual : trigger)
     }
 
-    private func startRefreshLoop() {
-        refreshTask?.cancel()
-        guard !quitRequested else { return }
-        let clock = self.clock
-        refreshTask = Task { [weak self] in
-            while !Task.isCancelled {
-                do {
-                    try await clock.sleep(for: .seconds(2))
-                } catch {
-                    return
-                }
-                guard !Task.isCancelled else { return }
-                guard let self else { return }
-                self.requestRefresh()
-            }
-        }
-    }
-
-    private func startScan(isManual: Bool) {
-        guard isPresented,
-              !quitRequested,
-              activeTerminationIdentity == nil,
-              scanToken == nil else { return }
+    private func startScan(isManual: Bool, trigger: ScanTrigger) {
+        guard isPresented, !quitRequested, activeTerminationIdentity == nil, scanToken == nil else { return }
         scanGeneration &+= 1
-        let generation = scanGeneration
-        let session = sessionGeneration
+        let request = PortScanRequest(
+            targetID: selectedTarget.id,
+            sessionGeneration: sessionGeneration,
+            scanGeneration: scanGeneration,
+            trigger: trigger
+        )
         let token = UUID()
+        let scanner = activeScanner ?? scanner(for: selectedTarget)
+        activeScanner = scanner
         scanToken = token
         activeScanIsManual = isManual
         isScanning = true
-        let scanner = self.scanner
+        if selectedTarget.isRemote, hasSnapshot { isStale = true }
         scanTask = Task { [weak self] in
-            let outcome = await scanner.scan(generation: generation)
+            let outcome = await scanner.scan(request)
             guard let self else { return }
-            self.finishScan(outcome, session: session, token: token)
+            self.finishScan(outcome, request: request, token: token)
         }
     }
 
-    private func finishScan(_ outcome: ScanOutcome, session: UInt64, token: UUID) {
+    private func finishScan(_ outcome: PortScanOutcome, request: PortScanRequest, token: UUID) {
         guard scanToken == token else { return }
-        let finishedManualRefresh = activeScanIsManual
+        let finishedManual = activeScanIsManual
         activeScanIsManual = false
         scanToken = nil
         scanTask = nil
         isScanning = false
-
-        if finishedManualRefresh && !pendingManualRefresh {
-            isManualRefreshing = false
-        }
-
-        if session == sessionGeneration, isPresented, !quitRequested {
+        if finishedManual && !pendingManualRefresh { isManualRefreshing = false }
+        let matches = request.targetID == selectedTarget.id
+            && request.sessionGeneration == sessionGeneration && isPresented && !quitRequested
+        var retryDelay: Duration = .seconds(2)
+        if matches {
             switch outcome {
-            case let .success(snapshot, diagnostics):
-                hasSnapshot = true
+            case let .success(targeted)
+                where targeted.targetID == request.targetID && targeted.sessionGeneration == request.sessionGeneration:
+                var state = targetStates[request.targetID] ?? .empty
+                state.snapshot = targeted.snapshot
+                state.lastSuccess = .now
+                state.diagnostics = targeted.diagnostics
+                state.failure = nil
+                state.consecutiveFailures = 0
+                targetStates[request.targetID] = state
+                publishSelectedTargetState()
                 isStale = false
-                if listenerRows != snapshot.listeners { listenerRows = snapshot.listeners }
-                if connectionRows != snapshot.connections { connectionRows = snapshot.connections }
-                lastDiagnostics = diagnostics
-                scanError = nil
-                clearTerminationStatesForMissingIdentities(in: snapshot)
-            case let .failure(error, diagnostics):
-                if error != .cancelled {
-                    scanError = error
+                clearTerminationStatesForMissingIdentities(in: targeted.snapshot)
+            case let .failure(targetID, session, error, diagnostics)
+                where targetID == request.targetID && session == request.sessionGeneration:
+                if !error.isCancellation {
+                    var state = targetStates[request.targetID] ?? .empty
+                    state.diagnostics = diagnostics
+                    state.failure = error
+                    state.consecutiveFailures += 1
+                    targetStates[request.targetID] = state
+                    publishSelectedTargetState()
                     isStale = hasSnapshot
-                    lastDiagnostics = diagnostics
+                    if selectedTarget.isRemote { retryDelay = Self.backoffDelay(for: state.consecutiveFailures) }
                 }
-            case .cancelled:
+            case .success, .failure, .cancelled:
                 break
             }
         }
-
         if !isPresented {
             pendingRefresh = false
             pendingManualRefresh = false
             isManualRefreshing = false
-        } else {
+        } else if pendingRefresh {
             drainPendingRefreshIfPossible()
+        } else {
+            scheduleNext(after: retryDelay)
+        }
+    }
+
+    static func backoffDelay(for failures: Int) -> Duration {
+        .seconds([2, 4, 8, 16, 30][min(max(failures - 1, 0), 4)])
+    }
+
+    private func scheduleNext(after duration: Duration) {
+        scheduleTask?.cancel()
+        let clock = self.clock
+        nextRetrySeconds = Int(duration.components.seconds)
+        scheduleTask = Task { [weak self] in
+            do { try await clock.sleep(for: duration) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.nextRetrySeconds = nil
+            self.requestRefresh()
         }
     }
 
     private func waitForScanToFinish() async {
         while scanToken != nil, !Task.isCancelled {
-            do {
-                try await Task.sleep(for: .milliseconds(10))
-            } catch {
-                return
-            }
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
         }
     }
 
-    private func finishTermination(
-        _ outcome: TerminationOutcome,
-        identity: ProcessIdentity,
-        token: UUID
-    ) {
+    private func cancelActiveScan() {
+        scanTask?.cancel()
+        let scanner = activeScanner
+        Task { await scanner?.cancelActiveWork() }
+    }
+
+    private func finishTermination(_ outcome: TerminationOutcome, identity: ProcessIdentity, token: UUID) {
         guard terminationToken == token, activeTerminationIdentity == identity else { return }
         terminationTask = nil
         terminationToken = nil
         activeTerminationIdentity = nil
-
         switch outcome {
         case .exited:
             terminationStates.removeValue(forKey: identity)
             removeRows(for: identity)
             if isPresented { pendingRefresh = true }
-        case .forceKillAvailable:
-            terminationStates[identity] = .forceKillAvailable
+        case .forceKillAvailable: terminationStates[identity] = .forceKillAvailable
         case let .failed(failure):
             terminationStates[identity] = .failed(failure)
             if isPresented { pendingRefresh = true }
-        case .cancelled:
-            terminationStates.removeValue(forKey: identity)
+        case .cancelled: terminationStates.removeValue(forKey: identity)
         }
         drainPendingRefreshIfPossible()
     }
 
-    private func drainPendingRefreshIfPossible() {
-        guard isPresented,
-              !quitRequested,
-              pendingRefresh,
-              activeTerminationIdentity == nil,
-              scanToken == nil else { return }
-        pendingRefresh = false
-        let shouldStartManualRefresh = pendingManualRefresh
-        pendingManualRefresh = false
-        startScan(isManual: shouldStartManualRefresh)
-    }
-
     private func removeRows(for identity: ProcessIdentity) {
-        let newListeners = listenerRows.filter { $0.identity != identity }
-        let newConnections = connectionRows.filter { $0.identity != identity }
-        if listenerRows != newListeners { listenerRows = newListeners }
-        if connectionRows != newConnections { connectionRows = newConnections }
+        listenerRows.removeAll { $0.localIdentity == identity }
+        connectionRows.removeAll { $0.localIdentity == identity }
+        if var state = targetStates[.local], let snapshot = state.snapshot {
+            state.snapshot = PortSnapshot(
+                listeners: snapshot.listeners.filter { $0.localIdentity != identity },
+                connections: snapshot.connections.filter { $0.localIdentity != identity }
+            )
+            targetStates[.local] = state
+        }
     }
 
     private func clearTerminationStatesForMissingIdentities(in snapshot: PortSnapshot) {
-        let identities = Set(snapshot.allRows.compactMap(\.identity))
-        let retainedStates = terminationStates.filter { identities.contains($0.key) }
-        if retainedStates != terminationStates {
-            terminationStates = retainedStates
-        }
-        if let promptIdentity = forceKillPrompt?.identity, !identities.contains(promptIdentity) {
-            forceKillPrompt = nil
-        }
+        let identities = Set(snapshot.allRows.compactMap(\.localIdentity))
+        terminationStates = terminationStates.filter { identities.contains($0.key) }
+        if let promptIdentity = forceKillPrompt?.localIdentity, !identities.contains(promptIdentity) { forceKillPrompt = nil }
     }
 }

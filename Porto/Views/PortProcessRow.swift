@@ -22,13 +22,31 @@ struct PortProcessRow: View {
         .contentShape(Rectangle())
         .focusable()
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Process \(row.processName), port \(row.localPort)")
+        .accessibilityLabel(accessibilitySummary)
         .padding(.vertical, 2)
+    }
+
+    private var accessibilitySummary: String {
+        let process = row.processName.isEmpty ? "Unknown process" : row.processName
+        let activity = row.activityKind == .listener ? "listener" : "connection"
+        let endpoints = row.endpoints.map(\.rawValue).joined(separator: ", ")
+        let access = row.isRemote ? ", read-only" : ""
+        return "\(monitor.selectedTarget.displayName), \(process), \(row.transport.rawValue), local port \(row.localPort), \(activity), \(endpoints)\(access)"
     }
 
     @ViewBuilder
     private var actions: some View {
-        if monitor.isOwnProcess(row) {
+        if row.isRemote {
+            Image(systemName: "lock.fill")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Remote process controls disabled")
+                .help("Remote process controls are disabled.")
+        } else if !row.isActionable {
+            Image(systemName: "lock.fill")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Process identity unavailable; controls disabled")
+                .help("Porto could not verify this process identity, so process controls are disabled.")
+        } else if monitor.isOwnProcess(row) {
             Image(systemName: "nosign")
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Porto cannot stop itself")
@@ -64,7 +82,7 @@ struct PortProcessRow: View {
         .foregroundStyle(.secondary)
         .disabled(monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Stop \(row.processName)")
-        .help("Send SIGTERM to process \(row.processName) (PID \(row.pid)). This can close all ports owned by the process.")
+        .help("Send SIGTERM to process \(row.processName) (PID \(row.pid ?? 0)). This can close all ports owned by the process.")
     }
 
     private var forceKillButton: some View {
@@ -79,7 +97,7 @@ struct PortProcessRow: View {
         .buttonStyle(.borderless)
         .disabled(monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Force kill \(row.processName)")
-        .help("Force kill \(row.processName) (PID \(row.pid)). SIGKILL prevents cleanup and can lose unsaved work.")
+        .help("Force kill \(row.processName) (PID \(row.pid ?? 0)). SIGKILL prevents cleanup and can lose unsaved work.")
     }
 
     private func failureIndicator(_ failure: TerminationFailure) -> some View {

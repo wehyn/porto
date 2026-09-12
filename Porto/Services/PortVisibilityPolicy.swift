@@ -25,9 +25,47 @@ struct PortVisibilityPolicy: Sendable, Equatable {
         ]
     )
 
+    /// Keeps remote snapshots focused on developer-owned services by hiding
+    /// common host infrastructure ports. Custom application ports remain
+    /// visible, even when their process metadata is unavailable over SSH.
+    static let remoteFocused = PortVisibilityPolicy(
+        hiddenPorts: [
+            22,    // SSH
+            53,    // DNS
+            80,    // HTTP
+            123,   // NTP
+            137,   // NetBIOS name service
+            138,   // NetBIOS datagram service
+            139,   // NetBIOS session service
+            161,   // SNMP
+            162,   // SNMP traps
+            443,   // HTTPS
+            445,   // SMB
+            5353   // mDNS
+        ],
+        hiddenProcessNames: ["unknown process"]
+    )
+
     func includes(_ group: ParsedPortGroup) -> Bool {
-        !hiddenPorts.contains(group.key.localPort)
-            && !hiddenProcessNames.contains(Self.normalized(group.processName))
+        includes(port: group.key.localPort, processName: group.processName)
+    }
+
+    func includes(_ row: PortProcess) -> Bool {
+        includes(port: row.localPort, processName: row.processName)
+    }
+
+    func filtering(_ snapshot: PortSnapshot) -> PortSnapshot {
+        PortSnapshot(
+            listeners: snapshot.listeners.filter { includes($0) },
+            connections: snapshot.connections.filter { includes($0) }
+        )
+    }
+
+    private func includes(port: Int, processName: String) -> Bool {
+        let normalizedName = Self.normalized(processName)
+        let isDocker = normalizedName.hasPrefix("docker · ")
+        return (isDocker || !hiddenPorts.contains(port))
+            && !hiddenProcessNames.contains(normalizedName)
     }
 
     private static func normalized(_ processName: String) -> String {

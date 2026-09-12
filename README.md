@@ -1,8 +1,10 @@
 # Porto
 
-Porto is a macOS 26+ menu-bar utility for viewing local TCP/UDP listeners and
-active connections. It uses the installed `/usr/sbin/lsof` directly and keeps
-process termination behind identity and socket revalidation.
+Porto is a macOS 26+ menu-bar utility for viewing TCP/UDP listeners and active
+connections on This Mac or one selected Linux host. It uses the installed
+`/usr/sbin/lsof` directly for local inspection and OpenSSH plus Linux `ss` for
+read-only remote inspection. Local process termination remains behind identity
+and socket revalidation; remote rows are always read-only.
 
 ## Requirements
 
@@ -50,11 +52,71 @@ starts the first scan; while it remains visible, refreshes are requested every
 a user-requested refresh. Closing it stops recurring scans. Use the overflow menu for About
 Porto and Quit Porto.
 
-The default view is developer-focused: it hides known macOS infrastructure plus
-Zen and Discord helper processes by name, while keeping custom project ports
-visible.
-Listeners and active connections appear together in one list, sorted by local
-port.
+The default view is developer-focused for This Mac: it hides known macOS
+infrastructure plus Zen and Discord helper processes by name, while keeping
+custom project ports visible. Remote targets hide common host-service ports
+(22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) while keeping custom
+project ports visible. Remote `Unknown process` rows are hidden; published
+Docker ports are retained—even when they use a common host-service port—and
+labeled `Docker · <container>` from optional Docker metadata. The filter is
+applied after parsing, so scan diagnostics still account for every valid remote
+record. Listeners and active connections appear together in one list, sorted by
+local port.
+
+## Remote Linux targets
+
+Porto discovers literal aliases from `~/.ssh/config` when the popover opens. It
+does not connect or run `Match exec` just to populate the picker. Wildcard,
+negated, and `Match`-only entries are ignored; aliases are sorted and passed to
+OpenSSH exactly as configured. To add a target, configure it in OpenSSH first:
+
+```sshconfig
+Host porto-linux
+    HostName 192.0.2.10
+    User wayne
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+The selected alias is used with `/usr/bin/ssh` and the user's existing agent,
+keys, port, `ProxyJump`, and known-host configuration. Porto is noninteractive:
+password/passphrase prompts are disabled, and the host key must already be
+trusted through normal OpenSSH verification. User-configured `ProxyCommand`,
+`KnownHostsCommand`, and other SSH helpers remain part of the user's trust
+boundary and may have their own side effects.
+
+Each visible remote refresh launches the following bounded command. The alias
+is one argument after `--`; the remote command is a source-code constant and is
+never built from UI input:
+
+```text
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
+```
+
+The Linux host must provide an `ss` implementation with the fixed iproute2
+options shown above. Porto optionally reads published ports with a bounded
+`docker ps` query when the configured SSH account can access both Docker and
+the existing `timeout` utility; containers without a published host port are
+not represented by that metadata. A Docker metadata timeout or failure never
+changes the `ss` result. Ownerless non-Docker rows are hidden unless they match
+a published Docker port, while names and Linux PIDs remain informational only.
+No
+remote signal, `sudo`, `doas`, helper installation, configuration change, or
+privilege escalation is attempted.
+
+Remote scans run only while the popover is visible (or after an explicit retry).
+Completion schedules the next visible refresh after 2 seconds. Failures use
+bounded backoff of 2, 4, 8, 16, then 30 seconds. One successful snapshot per
+target is retained in memory until Porto quits; a failed refresh shows that
+target's last results as stale and never replaces them with an empty list.
+`Available over SSH` describes a successful fixed command, not a persistent SSH
+connection. A listener is evidence on the selected server, not a reachability
+or public-exposure test.
+
+Troubleshooting follows the status shown in the popover: add a literal alias if
+the picker is empty; establish the host key and noninteractive credentials with
+the normal `ssh <alias>` workflow; check that the host is reachable; and verify
+that `ss -H -n -O -a -t -u -p -e` works for the configured Linux user. Porto does
+not display or store raw SSH stderr, endpoints, process lists, or snapshots.
 
 ## Runtime acceptance
 
@@ -68,5 +130,7 @@ period and requires confirmation. Activity Monitor should show no normal
 `lsof` child while the popover is closed and never more than one while it is
 open.
 
-No port/process data is persisted or sent over the network. Porto does not use
-privileged helpers or elevated scans.
+Porto does not persist port/process data or collect telemetry. Selecting a
+remote target intentionally sends the fixed `ss` query through the user's SSH
+configuration; This Mac scans remain local and Porto does not make any other
+network requests. Porto does not use privileged helpers or elevated scans.
