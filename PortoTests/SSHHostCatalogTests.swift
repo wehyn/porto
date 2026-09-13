@@ -31,16 +31,17 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertFalse(result.retainedPreviousCatalog)
     }
 
-    func testIncludesOrdinaryAliasesIncludingOrbBecauseSelectionIsUserMediated() throws {
+    func testHidesGitHubKeyButKeepsOrbStackLocalAliases() throws {
         let home = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: home) }
         let ssh = try makeSSHDirectory(in: home)
         let config = "Host github.com ORB production orb-stack\n"
         try Data(config.utf8).write(to: ssh.appendingPathComponent("config"))
 
-        let result = SSHHostCatalog(homeDirectory: home).load()
+        let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "user").load()
 
-        XCTAssertEqual(result.hosts.map(\.alias), ["github.com", "ORB", "orb-stack", "production"])
+        XCTAssertEqual(result.hosts.map(\.alias), ["ORB", "orb-stack", "production"])
+        XCTAssertEqual(result.candidates.map(\.alias), ["ORB", "orb-stack", "production"])
     }
 
     func testExtractsSafeMetadataAndUsesDeterministicDefaults() throws {
@@ -56,7 +57,7 @@ final class SSHHostCatalogTests: XCTestCase {
         Host alpha
             HostName should-not-win.example
             User bob
-        Host orb
+        Host local-only
             HostName %h
             User bad$user
             Port 0
@@ -75,7 +76,7 @@ final class SSHHostCatalogTests: XCTestCase {
 
         let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "local-user").load()
 
-        XCTAssertEqual(result.candidates.map(\.alias), ["after-match", "alpha", "defaults", "orb", "unsafe", "zeta"])
+        XCTAssertEqual(result.candidates.map(\.alias), ["after-match", "alpha", "defaults", "local-only", "unsafe", "zeta"])
         let byAlias = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.alias, $0) })
         XCTAssertEqual(byAlias["alpha"]?.host, "host.example")
         XCTAssertEqual(byAlias["alpha"]?.username, "alice")
@@ -87,9 +88,9 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertEqual(byAlias["defaults"]?.host, "defaults")
         XCTAssertEqual(byAlias["defaults"]?.username, "local-user")
         XCTAssertEqual(byAlias["defaults"]?.port, 22)
-        XCTAssertEqual(byAlias["orb"]?.host, "orb")
-        XCTAssertEqual(byAlias["orb"]?.username, "local-user")
-        XCTAssertNil(byAlias["orb"]?.identityFilePath)
+        XCTAssertEqual(byAlias["local-only"]?.host, "local-only")
+        XCTAssertEqual(byAlias["local-only"]?.username, "local-user")
+        XCTAssertNil(byAlias["local-only"]?.identityFilePath)
         XCTAssertEqual(byAlias["unsafe"]?.host, "unsafe")
         XCTAssertEqual(byAlias["after-match"]?.username, "local-user")
         XCTAssertEqual(byAlias["alpha"]?.id, SSHHostCandidate(alias: "ALPHA", host: "x", username: "u").id)
@@ -262,9 +263,13 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertEqual(chmod(config.path, 0), 0)
         defer { _ = chmod(config.path, S_IRUSR | S_IWUSR) }
 
-        let result = SSHHostCatalog(homeDirectory: home).load(previous: [SSHHost(alias: "prior")])
+        let result = SSHHostCatalog(homeDirectory: home).load(previous: [
+            SSHHost(alias: "prior"),
+            SSHHost(alias: "ORB"),
+            SSHHost(alias: "github.com")
+        ])
 
-        XCTAssertEqual(result.hosts.map(\.alias), ["prior"])
+        XCTAssertEqual(result.hosts.map(\.alias), ["prior", "ORB"])
         XCTAssertTrue(result.retainedPreviousCatalog)
         XCTAssertEqual(result.diagnostics, [.rootUnreadable])
         XCTAssertFalse(String(describing: result.diagnostics).contains("private-production-name"))

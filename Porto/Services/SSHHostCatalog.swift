@@ -71,23 +71,25 @@ struct SSHHostCatalog: Sendable {
         var state = LoadState()
         let rootRead = readConfiguration(at: rootURL, depth: 0, isRoot: true, state: &state)
         if rootRead == .failed {
+            let visiblePrevious = previous.filter { !Self.isHiddenAlias($0.alias) }
             return SSHHostCatalogResult(
-                hosts: previous,
-                candidates: previous.compactMap { host in
+                hosts: visiblePrevious,
+                candidates: visiblePrevious.compactMap { host in
                     guard let defaultUsername else { return nil }
                     return SSHHostCandidate(alias: host.alias, host: host.alias, username: defaultUsername)
                 },
                 diagnostics: state.diagnostics,
-                retainedPreviousCatalog: !previous.isEmpty,
+                retainedPreviousCatalog: !visiblePrevious.isEmpty,
                 filesRead: state.filesRead,
                 bytesRead: state.bytesRead
             )
         }
 
-        let candidates = Self.sortedAndDeduplicated(state.candidates.values.compactMap { metadata in
+        let visibleCandidates = state.candidates.values.filter { !Self.isHiddenAlias($0.alias) }
+        let candidates = Self.sortedAndDeduplicated(visibleCandidates.compactMap { metadata in
             metadata.candidate(defaultUsername: defaultUsername)
         })
-        let hosts = Self.sortedAliases(state.candidates.values.map(\.alias)).map(SSHHost.init(alias:))
+        let hosts = Self.sortedAliases(visibleCandidates.map(\.alias)).map(SSHHost.init(alias:))
         return SSHHostCatalogResult(
             hosts: hosts,
             candidates: candidates,
@@ -403,6 +405,15 @@ struct SSHHostCatalog: Sendable {
             let comparison = lhs.localizedCaseInsensitiveCompare(rhs)
             if comparison != .orderedSame { return comparison == .orderedAscending }
             return lhs < rhs
+        }
+    }
+
+    /// GitHub's host entry is an authentication-key configuration rather than
+    /// a user-selectable Linux target.
+    private static func isHiddenAlias(_ alias: String) -> Bool {
+        switch caseFold(alias) {
+        case "github.com": return true
+        default: return false
         }
     }
 

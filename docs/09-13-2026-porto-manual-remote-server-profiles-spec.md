@@ -280,8 +280,10 @@ action.
   accepted by the local Darwin signal sender.
 
 - No automatic connection or automatic profile save occurs during discovery.
-  Existing literal SSH entries, including entries such as OrbStack's `orb`,
-  are merely user-selectable proposals. Include traversal is bounded and safe;
+  Existing literal SSH entries are merely user-selectable proposals. Porto
+  omits the key-only `github.com` entry, while OrbStack's local-only `orb`
+  alias remains eligible for explicit selection. Include traversal is bounded
+  and safe;
   Match, wildcard, negated, ProxyJump, ProxyCommand, and other connection
   behavior are not carried into the saved profile or runtime command.
 
