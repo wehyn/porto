@@ -31,7 +31,12 @@ struct PortProcessRow: View {
         let process = row.processName.isEmpty ? "Unknown process" : row.processName
         let activity = row.activityKind == .listener ? "listener" : "connection"
         let endpoints = row.endpoints.map(\.rawValue).joined(separator: ", ")
-        let access = row.isRemote ? ", read-only" : ""
+        let access: String
+        if row.isRemote {
+            access = row.isActionable ? ", remote controls available" : ", remote controls disabled"
+        } else {
+            access = ""
+        }
         let portLabel = row.localPorts.count == 1 ? "local port" : "local ports"
         return "\(monitor.selectedTarget.displayName), \(process), \(transportSummary), \(portLabel) \(accessiblePortSummary), \(activity), \(endpoints)\(access)"
     }
@@ -54,11 +59,11 @@ struct PortProcessRow: View {
 
     @ViewBuilder
     private var actions: some View {
-        if row.isRemote {
+        if !row.isActionable && row.isRemote {
             Image(systemName: "lock.fill")
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Remote process controls disabled")
-                .help("Remote process controls are disabled.")
+                .help("Porto could not verify this remote process identity, so process controls are disabled.")
         } else if !row.isActionable {
             Image(systemName: "lock.fill")
                 .foregroundStyle(.secondary)
@@ -98,7 +103,7 @@ struct PortProcessRow: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
-        .disabled(monitor.isTerminationDisabled(for: row))
+        .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Stop \(row.processName)")
         .help("Send SIGTERM to process \(row.processName) (PID \(row.pid ?? 0)). This can close all ports owned by the process.")
     }
@@ -113,7 +118,7 @@ struct PortProcessRow: View {
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.borderless)
-        .disabled(monitor.isTerminationDisabled(for: row))
+        .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Force kill \(row.processName)")
         .help("Force kill \(row.processName) (PID \(row.pid ?? 0)). SIGKILL prevents cleanup and can lose unsaved work.")
     }

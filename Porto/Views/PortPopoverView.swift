@@ -5,6 +5,7 @@ struct PortPopoverView: View {
     @ObservedObject var monitor: PortMonitor
     @ObservedObject var presentationObserver: MenuPresentationObserver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,6 +60,8 @@ struct PortPopoverView: View {
             .keyboardShortcut("r", modifiers: [.command])
 
             Menu {
+                Button("Settings…") { openWindow(id: "settings") }
+                Divider()
                 Button("About Porto") {
                     NSApp.activate(ignoringOtherApps: true)
                     NSApp.orderFrontStandardAboutPanel(nil)
@@ -92,18 +95,11 @@ struct PortPopoverView: View {
                 .font(.caption)
                 .foregroundStyle(monitor.remoteFailure == nil ? Color.secondary : Color.orange)
                 .fixedSize(horizontal: false, vertical: true)
-            if monitor.sshHosts.isEmpty {
-                Text("Add a Linux Host alias to ~/.ssh/config to inspect a remote machine over SSH.")
+            if monitor.profiles.isEmpty {
+                Text("Add a remote server profile in Settings to inspect another machine over SSH.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if !monitor.catalogDiagnostics.isEmpty {
-                Label("Some SSH config entries could not be read.", systemImage: "exclamationmark.triangle")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityLabel("Some SSH config entries could not be read")
             }
         }
         .padding(.horizontal, 14)
@@ -179,14 +175,6 @@ struct PortPopoverView: View {
             errorFooter(error.userMessage)
         } else if let error = monitor.remoteFailure, monitor.hasSnapshot {
             errorFooter(error.userMessage + " Showing last results.")
-        }
-        if monitor.isRemoteTarget {
-            Text("Remote process controls disabled")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 9)
         }
     }
 

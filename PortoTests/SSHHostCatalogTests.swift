@@ -19,7 +19,7 @@ final class SSHHostCatalogTests: XCTestCase {
             result.hosts.map(\.alias),
             [
                 "after-match", "alpha", "Bravo", "charlie", "continued-alias",
-                "DUPLICATE", "environment-expanded", "equals-form", "escaped alias", "escaped#hash",
+                "duplicate", "environment-expanded", "equals-form", "escaped alias", "escaped#hash",
                 "Foo", "hash#alias", "nested-relative", "quoted alias", "tilde-expanded", "zeta"
             ]
         )
@@ -31,7 +31,7 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertFalse(result.retainedPreviousCatalog)
     }
 
-    func testHidesGitHubKeyAndOrbStackLocalAliases() throws {
+    func testIncludesOrdinaryAliasesIncludingOrbBecauseSelectionIsUserMediated() throws {
         let home = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: home) }
         let ssh = try makeSSHDirectory(in: home)
@@ -40,7 +40,90 @@ final class SSHHostCatalogTests: XCTestCase {
 
         let result = SSHHostCatalog(homeDirectory: home).load()
 
-        XCTAssertEqual(result.hosts.map(\.alias), ["orb-stack", "production"])
+        XCTAssertEqual(result.hosts.map(\.alias), ["github.com", "ORB", "orb-stack", "production"])
+    }
+
+    func testExtractsSafeMetadataAndUsesDeterministicDefaults() throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ssh = try makeSSHDirectory(in: home)
+        let config = """
+        Host zeta alpha
+            HostName host.example
+            User alice
+            Port 2200
+            IdentityFile ~/.ssh/id_ed25519
+        Host alpha
+            HostName should-not-win.example
+            User bob
+        Host orb
+            HostName %h
+            User bad$user
+            Port 0
+            IdentityFile $HOME/id_rsa
+        Host defaults
+        Host unsafe
+            HostName host;touch /tmp/x
+            IdentityFile ~/.ssh/id_%h
+        Match exec "false"
+            HostName ignored.example
+            User ignored
+            Port 99
+        Host after-match
+        """
+        try Data(config.utf8).write(to: ssh.appendingPathComponent("config"))
+
+        let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "local-user").load()
+
+        XCTAssertEqual(result.candidates.map(\.alias), ["after-match", "alpha", "defaults", "orb", "unsafe", "zeta"])
+        let byAlias = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.alias, $0) })
+        XCTAssertEqual(byAlias["alpha"]?.host, "host.example")
+        XCTAssertEqual(byAlias["alpha"]?.username, "alice")
+        XCTAssertEqual(byAlias["alpha"]?.port, 2200)
+        XCTAssertEqual(
+            byAlias["alpha"]?.identityFilePath,
+            home.appendingPathComponent(".ssh/id_ed25519").standardizedFileURL.path
+        )
+        XCTAssertEqual(byAlias["defaults"]?.host, "defaults")
+        XCTAssertEqual(byAlias["defaults"]?.username, "local-user")
+        XCTAssertEqual(byAlias["defaults"]?.port, 22)
+        XCTAssertEqual(byAlias["orb"]?.host, "orb")
+        XCTAssertEqual(byAlias["orb"]?.username, "local-user")
+        XCTAssertNil(byAlias["orb"]?.identityFilePath)
+        XCTAssertEqual(byAlias["unsafe"]?.host, "unsafe")
+        XCTAssertEqual(byAlias["after-match"]?.username, "local-user")
+        XCTAssertEqual(byAlias["alpha"]?.id, SSHHostCandidate(alias: "ALPHA", host: "x", username: "u").id)
+        XCTAssertEqual(byAlias["alpha"]?.addressLabel, "host.example:2200")
+        XCTAssertEqual(SSHHostCandidate(alias: "ipv6", host: "2001:db8::1", username: "u").addressLabel, "2001:db8::1")
+    }
+
+    func testInvalidFallbackUsernameDoesNotProduceCandidates() throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ssh = try makeSSHDirectory(in: home)
+        try Data("Host defaults\n".utf8).write(to: ssh.appendingPathComponent("config"))
+
+        let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "bad user").load()
+
+        XCTAssertTrue(result.candidates.isEmpty)
+        XCTAssertEqual(result.hosts.map(\.alias), ["defaults"])
+    }
+
+    func testOmitsAliasesThatCannotBecomeDirectProfiles() throws {
+        let home = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let ssh = try makeSSHDirectory(in: home)
+        let config = """
+        Host \"needs manual\"
+        Host valid
+            HostName 192.168.1.20
+        """
+        try Data(config.utf8).write(to: ssh.appendingPathComponent("config"))
+
+        let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "user").load()
+
+        XCTAssertEqual(result.hosts.map(\.alias), ["needs manual", "valid"])
+        XCTAssertEqual(result.candidates.map(\.alias), ["valid"])
     }
 
     func testMissingRootIsAnIntentionalEmptyCatalogAndDoesNotRetainPrior() throws {

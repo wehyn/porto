@@ -8,6 +8,7 @@ struct PortoApp: App {
 
     init() {
         let runner = LsofRunner()
+        let sshRunner = SSHCommandRunner()
         let inspector = DarwinProcessInspector()
         let scanner = PortScanner(runner: runner, inspector: inspector)
         let terminator = ProcessTerminator(
@@ -15,11 +16,15 @@ struct PortoApp: App {
             inspector: inspector,
             signalSender: DarwinProcessSignalSender()
         )
+        let profileStore = UserDefaultsRemoteServerProfileStore()
         _monitor = StateObject(wrappedValue: PortMonitor(
             localScanner: scanner,
             terminator: terminator,
-            hostCatalog: SSHHostCatalog(),
-            remoteScannerFactory: { host in RemotePortScanner(host: host) }
+            remoteScannerFactory: { profile in RemotePortScanner(profile: profile, runner: sshRunner) },
+            profileStore: profileStore,
+            remoteTerminatorFactory: { profile in
+                RemoteProcessTerminator(profile: profile, runner: sshRunner)
+            }
         ))
         _presentationObserver = StateObject(wrappedValue: MenuPresentationObserver())
     }
@@ -45,5 +50,9 @@ struct PortoApp: App {
                 }
         }
         .menuBarExtraStyle(.window)
+
+        Window("Settings", id: "settings") {
+            RemoteServerSettingsView(monitor: monitor)
+        }
     }
 }

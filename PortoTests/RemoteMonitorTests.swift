@@ -4,181 +4,637 @@ import XCTest
 
 @MainActor
 final class RemoteMonitorTests: XCTestCase {
-    func testRemoteRowsAreReadOnlyAndNeverReachTerminator() async throws {
-        let root = try makeSSHDirectory(hosts: ["prod"])
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testStartsOnThisMacAndListsOnlyEnabledProfilesAlphabetically() async throws {
+        let disabled = profile(name: "Disabled", enabled: false)
+        let zulu = profile(name: "Zulu", enabled: true)
+        let alpha = profile(name: "alpha", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(disabled)
+        try store.save(zulu)
+        try store.save(alpha)
+
         let local = MonitorTestScanner(plans: [.success(.empty)])
-        let remote = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(name: "nginx", port: 8080))])
-        let terminator = RecordingTerminator()
-        let monitor = PortMonitor(
-            localScanner: local,
-            terminator: terminator,
-            hostCatalog: SSHHostCatalog(sshDirectory: root),
-            remoteScannerFactory: { _ in remote },
-            ownPID: 99,
-            clock: NeverMonitorClock()
+        let remote = MonitorTestScanner(plans: [])
+        let monitor = makeMonitor(
+            store: store,
+            local: local,
+            remote: remote
         )
         defer { monitor.setPresented(false) }
 
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        XCTAssertEqual(monitor.availableTargets.map(\.displayName), ["This Mac", "alpha", "Zulu"])
+
         monitor.setPresented(true)
-        await waitUntil { await local.count() == 1 }
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "prod")))
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        let remoteCount = await remote.count()
+        XCTAssertEqual(remoteCount, 0)
+    }
+
+    func testSavingAndEnablingDoesNotSelectOrConnect() async throws {
+        let store = InMemoryRemoteServerProfileStore()
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let remote = MonitorTestScanner(plans: [])
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+
+        var newProfile = profile(name: "New server", enabled: false)
+        try monitor.saveProfile(newProfile)
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        var remoteCount = await remote.count()
+        XCTAssertEqual(remoteCount, 0)
+
+        newProfile.isEnabled = true
+        try monitor.saveProfile(newProfile)
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        remoteCount = await remote.count()
+        XCTAssertEqual(remoteCount, 0)
+    }
+
+    func testSelectingEnabledProfileStartsOnlyThatRemoteScan() async throws {
+        let alpha = profile(name: "Alpha", enabled: true)
+        let beta = profile(name: "Beta", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(alpha)
+        try store.save(beta)
+
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let alphaScanner = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: alpha, name: "alpha-process", port: 8001, pid: 42))])
+        let betaScanner = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: beta, name: "beta-process", port: 8002, pid: 43))])
+        let monitor = makeMonitor(store: store, local: local) { profile in
+            profile.id == alpha.id ? alphaScanner : betaScanner
+        }
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(alpha))
+
+        await waitUntil { await alphaScanner.count() == 1 && !monitor.isScanning }
+        let betaCount = await betaScanner.count()
+        XCTAssertEqual(betaCount, 0)
+        XCTAssertEqual(monitor.selectedTarget, .remote(alpha))
+        XCTAssertEqual(monitor.listenerRows.first?.processName, "alpha-process")
+    }
+
+    func testDisablingSelectedProfileReturnsToThisMacAndStopsTargetAvailability() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = MonitorTestScanner(plans: [.success(.empty), .success(.empty)])
+        let remote = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: profile, name: "server", port: 8080, pid: 55))])
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
         await waitUntil { await remote.count() == 1 && !monitor.isScanning }
 
-        let row = try XCTUnwrap(monitor.listenerRows.first)
-        XCTAssertTrue(row.isRemote)
-        XCTAssertFalse(row.isActionable)
-        XCTAssertNil(monitor.terminationState(for: row))
-        monitor.requestStop(for: row)
-        let stopCount = await terminator.stopCount()
-        XCTAssertEqual(stopCount, 0)
-    }
+        try monitor.setProfileEnabled(id: profile.id, enabled: false)
 
-    func testTargetCachesAreIsolatedAndFailureRetainsOnlySelectedCache() async throws {
-        let root = try makeSSHDirectory(hosts: ["a", "b"])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let local = MonitorTestScanner(plans: [.success(.empty)])
-        let a = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(name: "a", port: 8001))])
-        let b = MonitorTestScanner(plans: [.failure(.remote(.hostUnreachable))])
-        let monitor = PortMonitor(
-            localScanner: local,
-            terminator: RecordingTerminator(),
-            hostCatalog: SSHHostCatalog(sshDirectory: root),
-            remoteScannerFactory: { host in
-                if host.alias == "a" {
-                    return a as any PortSnapshotScanning
-                }
-                return b as any PortSnapshotScanning
-            },
-            clock: NeverMonitorClock()
-        )
-        defer { monitor.setPresented(false) }
-
-        monitor.setPresented(true)
-        await waitUntil { await local.count() == 1 }
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "a")))
-        await waitUntil { await a.count() == 1 && !monitor.isScanning }
-        let aRows = monitor.listenerRows
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "b")))
-        await waitUntil { await b.count() == 1 && !monitor.isScanning }
-        XCTAssertTrue(monitor.listenerRows.isEmpty)
-        XCTAssertEqual(monitor.remoteFailure, .hostUnreachable)
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "a")))
-        await waitUntil { !monitor.isScanning }
-        XCTAssertEqual(monitor.listenerRows, aRows)
-        XCTAssertTrue(monitor.isStale)
-    }
-
-    func testLateOldTargetResultCannotPublishAfterSwitch() async throws {
-        let root = try makeSSHDirectory(hosts: ["a", "b"])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let local = MonitorTestScanner(plans: [.success(.empty)])
-        let a = DelayedMonitorScanner(snapshot: makeRemoteSnapshot(name: "old", port: 8100))
-        let b = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(name: "new", port: 8101))])
-        let monitor = PortMonitor(
-            localScanner: local,
-            terminator: RecordingTerminator(),
-            hostCatalog: SSHHostCatalog(sshDirectory: root),
-            remoteScannerFactory: { host in
-                if host.alias == "a" {
-                    return a as any PortSnapshotScanning
-                }
-                return b as any PortSnapshotScanning
-            },
-            clock: NeverMonitorClock()
-        )
-        defer { monitor.setPresented(false) }
-
-        monitor.setPresented(true)
-        await waitUntil { await local.count() == 1 }
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "a")))
-        await waitUntil { await a.started() }
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "b")))
-        await a.release()
-        await waitUntil { await b.count() == 1 && monitor.listenerRows.first?.processName == "new" }
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        XCTAssertEqual(monitor.availableTargets.map(\.displayName), ["This Mac"])
         await Task.yield()
+        let remoteCount = await remote.count()
+        XCTAssertEqual(remoteCount, 1)
+    }
+
+    func testDeletingSelectedProfileReturnsToThisMac() async throws {
+        let profile = profile(name: "Disposable", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let remote = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: profile, name: "server", port: 8081, pid: 56))])
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+
+        monitor.deleteProfile(id: profile.id)
+
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        XCTAssertTrue(monitor.profiles.isEmpty)
+        XCTAssertEqual(monitor.availableTargets, [.local])
+    }
+
+    func testEditingSelectedProfileKeepsStableIDAndUsesNewDetails() async throws {
+        let original = profile(name: "Production", host: "old.example", enabled: true)
+        let updated = RemoteServerProfile(
+            id: original.id,
+            displayName: original.displayName,
+            host: "new.example",
+            username: original.username,
+            port: 2200,
+            identityFilePath: original.identityFilePath,
+            isEnabled: true
+        )
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(original)
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let oldScanner = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: original, name: "old", port: 8100, pid: 60))])
+        let newScanner = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: updated, name: "new", port: 8101, pid: 61))])
+        let monitor = makeMonitor(store: store, local: local) { profile in
+            profile.host == "old.example" ? oldScanner : newScanner
+        }
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(original))
+        await waitUntil { await oldScanner.count() == 1 && !monitor.isScanning }
+
+        try monitor.saveProfile(updated)
+
+        let newCountBeforeRefresh = await newScanner.count()
+        XCTAssertEqual(newCountBeforeRefresh, 0)
+        monitor.refresh()
+        await waitUntil {
+            await newScanner.count() == 1 && !monitor.isScanning
+        }
+        guard case let .remote(selected) = monitor.selectedTarget else {
+            return XCTFail("expected the edited profile to remain selected")
+        }
+        XCTAssertEqual(selected.id, original.id)
+        XCTAssertEqual(selected.host, "new.example")
+        XCTAssertEqual(selected.port, 2200)
         XCTAssertEqual(monitor.listenerRows.first?.processName, "new")
     }
 
-    func testRemovedSelectedAliasFallsBackToThisMacOnNextOpen() async throws {
-        let root = try makeSSHDirectory(hosts: ["gone"])
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testDisabledTestConnectionRefusesBeforeLaunchingScanner() async throws {
+        let disabled = profile(name: "Disabled", enabled: false)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(disabled)
+        let scanner = MonitorTestScanner(plans: [.success(.empty)])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: []), remote: scanner)
+
+        let result = await monitor.testConnection(for: disabled)
+
+        XCTAssertEqual(result, .refusedDisabled)
+        let scanCount = await scanner.count()
+        XCTAssertEqual(scanCount, 0)
+    }
+
+    func testTestConnectionWaitsForActiveScanBeforeStarting() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = DelayedMonitorScanner(snapshot: .empty)
+        let remote = CancellationRecordingScanner()
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.started() }
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        try? await Task.sleep(for: .milliseconds(30))
+        let startedBeforeScanFinished = await remote.started()
+        XCTAssertFalse(startedBeforeScanFinished)
+
+        await local.release()
+        await waitUntil { await remote.started() }
+        testTask.cancel()
+        let result = await testTask.value
+        XCTAssertEqual(result, .failed(.cancelled))
+        let cancellationCount = await remote.cancellationCount()
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testTestConnectionWaitsForActiveTerminationAndForceKillPrompt() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let rowSnapshot = makeRemoteSnapshot(profile: profile, name: "server", port: 8080, pid: 55)
+        let remote = MonitorTestScanner(plans: [.success(rowSnapshot), .success(.empty)])
+        let terminator = DelayedRecordingTerminator(outcome: .forceKillAvailable)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        guard let row = monitor.listenerRows.first else { return XCTFail("expected a remote row") }
+        monitor.requestStop(for: row)
+        await waitUntil { await terminator.started() }
+
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        try? await Task.sleep(for: .milliseconds(30))
+        let countWhileTerminating = await remote.count()
+        XCTAssertEqual(countWhileTerminating, 1)
+
+        await terminator.release()
+        await waitUntil { monitor.terminationState(for: row) == .forceKillAvailable }
+        let testResult = await testTask.value
+        XCTAssertEqual(testResult, RemoteConnectionTestResult.success)
+    }
+
+    func testActiveTestConnectionCannotStartRemoteTermination() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let rowSnapshot = makeRemoteSnapshot(profile: profile, name: "server", port: 8080, pid: 55)
+        let remote = DelayedMonitorScanner(snapshot: rowSnapshot)
+        let remoteTerminator = RecordingTerminator()
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]),
+                                   remote: remote, remoteTerminator: remoteTerminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.scanCount() == 1 }
+        await remote.release()
+        await waitUntil { monitor.listenerRows.count == 1 && !monitor.isScanning }
+        let row = try XCTUnwrap(monitor.listenerRows.first)
+
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        await waitUntil { await remote.scanCount() == 2 }
+
+        XCTAssertTrue(monitor.isTerminationDisabled(for: row))
+        monitor.requestStop(for: row)
+        XCTAssertNil(monitor.activeRemoteTerminationKey)
+        let stopCount = await remoteTerminator.stopCount()
+        XCTAssertEqual(stopCount, 0)
+
+        await remote.release()
+        let testResult = await testTask.value
+        XCTAssertEqual(testResult, .success)
+    }
+
+    func testTestConnectionRechecksSavedAuthorizationWhileWaiting() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = DelayedMonitorScanner(snapshot: .empty)
+        let remote = MonitorTestScanner(plans: [])
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.started() }
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        try? await Task.sleep(for: .milliseconds(30))
+        try monitor.setProfileEnabled(id: profile.id, enabled: false)
+        await local.release()
+
+        let result = await testTask.value
+        let remoteCount = await remote.count()
+        XCTAssertEqual(result, .refusedDisabled)
+        XCTAssertEqual(remoteCount, 0)
+    }
+
+    func testRefreshWaitsForActiveTestConnection() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
         let local = MonitorTestScanner(plans: [.success(.empty), .success(.empty)])
-        let remote = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(name: "gone", port: 8200))])
-        let monitor = PortMonitor(
-            localScanner: local,
-            terminator: RecordingTerminator(),
-            hostCatalog: SSHHostCatalog(sshDirectory: root),
-            remoteScannerFactory: { _ in remote },
-            clock: NeverMonitorClock()
+        let remote = CancellationRecordingScanner()
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        await waitUntil { await remote.started() }
+        monitor.refresh()
+        try? await Task.sleep(for: .milliseconds(30))
+        let localCountWhileTesting = await local.count()
+        XCTAssertEqual(localCountWhileTesting, 1)
+
+        testTask.cancel()
+        let result = await testTask.value
+        XCTAssertEqual(result, .failed(.cancelled))
+        await waitUntil { await local.count() == 2 && !monitor.isScanning }
+    }
+
+    func testTargetSwitchIsBlockedUntilActiveTestConnectionFinishes() async throws {
+        let alpha = profile(name: "Alpha", enabled: true)
+        let beta = profile(name: "Beta", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(alpha)
+        try store.save(beta)
+        let local = MonitorTestScanner(plans: [.success(.empty), .success(.empty)])
+        let alphaScanner = CancellationRecordingScanner()
+        let betaScanner = MonitorTestScanner(plans: [.success(.empty)])
+        let monitor = makeMonitor(store: store, local: local) { profile in
+            if profile.id == alpha.id {
+                return alphaScanner as any PortSnapshotScanning
+            }
+            return betaScanner as any PortSnapshotScanning
+        }
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        let testTask = Task { await monitor.testConnection(for: alpha) }
+        await waitUntil { await alphaScanner.started() }
+
+        monitor.selectTarget(.remote(beta))
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        let betaCountWhileTesting = await betaScanner.count()
+        XCTAssertEqual(betaCountWhileTesting, 0)
+
+        testTask.cancel()
+        let cancelledResult = await testTask.value
+        XCTAssertEqual(cancelledResult, .failed(.cancelled))
+        monitor.selectTarget(.remote(beta))
+        await waitUntil { await betaScanner.count() == 1 && !monitor.isScanning }
+    }
+
+    func testDisablingProfileCancelsActiveTestConnection() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let scanner = CancellationRecordingScanner()
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: []), remote: scanner)
+
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        await waitUntil { await scanner.started() }
+        try monitor.setProfileEnabled(id: profile.id, enabled: false)
+
+        let result = await testTask.value
+        let cancellationCount = await scanner.cancellationCount()
+        XCTAssertEqual(result, .refusedDisabled)
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testDeletingProfileCancelsActiveTestConnection() async throws {
+        let profile = profile(name: "Disposable", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let scanner = CancellationRecordingScanner()
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: []), remote: scanner)
+
+        let testTask = Task { await monitor.testConnection(for: profile) }
+        await waitUntil { await scanner.started() }
+        monitor.deleteProfile(id: profile.id)
+
+        let result = await testTask.value
+        let cancellationCount = await scanner.cancellationCount()
+        XCTAssertEqual(result, .refusedDisabled)
+        XCTAssertEqual(cancellationCount, 1)
+    }
+
+    func testRemoteRowsWithPIDsUseRemoteTerminatorAndMissingPIDIsDisabled() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let remote = MonitorTestScanner(plans: [
+            .success(makeRemoteSnapshot(profile: profile, name: "owned", port: 8200, pid: 77)),
+            .success(makeRemoteSnapshot(profile: profile, name: "owned", port: 8200, pid: 77))
+        ])
+        let localTerminator = RecordingTerminator()
+        let remoteTerminator = RecordingTerminator()
+        let monitor = makeMonitor(
+            store: store,
+            local: local,
+            remote: remote,
+            localTerminator: localTerminator,
+            remoteTerminator: remoteTerminator
         )
         defer { monitor.setPresented(false) }
 
         monitor.setPresented(true)
-        await waitUntil { await local.count() == 1 }
-        monitor.selectTarget(PortTarget.ssh(SSHHost(alias: "gone")))
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
         await waitUntil { await remote.count() == 1 && !monitor.isScanning }
 
-        try Data("Host replacement\n".utf8).write(to: root.appendingPathComponent("config"))
-        monitor.setPresented(false)
+        let owned = try XCTUnwrap(monitor.listenerRows.first)
+        XCTAssertTrue(owned.isActionable)
+        monitor.requestStop(for: owned)
+        await waitUntil { await remoteTerminator.stopCount() == 1 }
+        let localStopCount = await localTerminator.stopCount()
+        XCTAssertEqual(localStopCount, 0)
+
+        let missingPID = makeRemoteRow(profile: profile, name: "unknown", port: 8201, pid: nil)
+        XCTAssertFalse(missingPID.isActionable)
+        XCTAssertTrue(monitor.isTerminationDisabled(for: missingPID))
+    }
+
+    func testRemoteTerminationStatePublishesImmediatelyWhenNoScanIsActive() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let remote = MonitorTestScanner(plans: [
+            .success(makeRemoteSnapshot(profile: profile, name: "owned", port: 8200, pid: 77)),
+            .success(makeRemoteSnapshot(profile: profile, name: "owned", port: 8200, pid: 77))
+        ])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: RecordingTerminator(outcome: .forceKillAvailable))
+        defer { monitor.setPresented(false) }
+
         monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        let row = try XCTUnwrap(monitor.listenerRows.first)
+
+        monitor.requestStop(for: row)
+
+        XCTAssertEqual(monitor.terminationState(for: row), .inProgress)
+        await waitUntil { monitor.terminationState(for: row) == .forceKillAvailable }
+        XCTAssertNil(monitor.activeRemoteTerminationKey)
+    }
+
+    func testStableDockerRowIDDoesNotRetainForceKillForReplacementIdentity() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let original = makeRemoteRow(profile: profile, name: "docker-proxy", port: 8200, pid: 77,
+                                     id: "docker|container-1|listener", socketIdentity: "socket-old")
+        let replacement = makeRemoteRow(profile: profile, name: "docker-proxy", port: 8200, pid: 78,
+                                        id: "docker|container-1|listener", socketIdentity: "socket-new")
+        let remote = MonitorTestScanner(plans: [
+            .success(PortSnapshot(listeners: [original], connections: [])),
+            .success(PortSnapshot(listeners: [original], connections: [])),
+            .success(PortSnapshot(listeners: [replacement], connections: []))
+        ])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]),
+                                   remote: remote, remoteTerminator: RecordingTerminator(outcome: .forceKillAvailable))
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        monitor.requestStop(for: try XCTUnwrap(monitor.listenerRows.first))
+        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
+
+        let originalRow = try XCTUnwrap(monitor.listenerRows.first)
+        monitor.requestForceKill(for: originalRow)
+        XCTAssertNotNil(monitor.forceKillPrompt)
+        monitor.refresh()
+        await waitUntil { await remote.count() == 3 && !monitor.isScanning }
+
+        let current = try XCTUnwrap(monitor.listenerRows.first)
+        XCTAssertNil(monitor.terminationState(for: current))
+        XCTAssertNil(monitor.forceKillPrompt)
+    }
+
+    func testMissingRemoteIdentityDoesNotRetainForceKillEligibilityWhenItReappears() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let rowSnapshot = makeRemoteSnapshot(profile: profile, name: "owned", port: 8200, pid: 77)
+        let remote = MonitorTestScanner(plans: [
+            .success(rowSnapshot),
+            .success(rowSnapshot),
+            .success(.empty),
+            .success(rowSnapshot)
+        ])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: RecordingTerminator(outcome: .forceKillAvailable))
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        let row = try XCTUnwrap(monitor.listenerRows.first)
+        monitor.requestStop(for: row)
+        await waitUntil { monitor.terminationState(for: row) == .forceKillAvailable }
+        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
+        monitor.requestForceKill(for: row)
+        XCTAssertNotNil(monitor.forceKillPrompt)
+
+        monitor.refresh()
+        await waitUntil { await remote.count() == 3 && !monitor.isScanning }
+        XCTAssertNil(monitor.forceKillPrompt)
+        XCTAssertNil(monitor.terminationState(for: row))
+
+        monitor.refresh()
+        await waitUntil { await remote.count() == 4 && !monitor.isScanning }
+        let reappeared = try XCTUnwrap(monitor.listenerRows.first)
+        XCTAssertNil(monitor.terminationState(for: reappeared))
+    }
+
+    func testLateOldTargetResultCannotPublishAfterSwitch() async throws {
+        let alpha = profile(name: "Alpha", enabled: true)
+        let beta = profile(name: "Beta", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(alpha)
+        try store.save(beta)
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let delayed = DelayedMonitorScanner(snapshot: makeRemoteSnapshot(profile: alpha, name: "old", port: 8300, pid: 80))
+        let betaScanner = MonitorTestScanner(plans: [.success(makeRemoteSnapshot(profile: beta, name: "new", port: 8301, pid: 81))])
+        let monitor = makeMonitor(store: store, local: local) { profile in
+            if profile.id == alpha.id {
+                return delayed as any PortSnapshotScanning
+            }
+            return betaScanner as any PortSnapshotScanning
+        }
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(PortTarget.remote(alpha))
+        await waitUntil { await delayed.started() }
+        monitor.selectTarget(PortTarget.remote(beta))
+        await delayed.release()
+
+        await waitUntil { await betaScanner.count() == 1 && !monitor.isScanning }
+        XCTAssertEqual(monitor.listenerRows.first?.processName, "new")
+    }
+
+    func testClosingPopoverReturnsToThisMacAndCancelsRemoteWork() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = MonitorTestScanner(plans: [.success(.empty)])
+        let remote = CancellationRecordingScanner()
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.started() }
+
+        monitor.setPresented(false)
 
         XCTAssertEqual(monitor.selectedTarget, .local)
-        await waitUntil { await local.count() == 2 && !monitor.isScanning }
+        await waitUntil { await remote.cancellationCount() == 1 }
     }
 
-    func testGitHubKeyAndOrbStackAliasesAreNotRemoteTargets() throws {
-        let root = try makeSSHDirectory(hosts: ["github.com", "orb", "prod"])
-        defer { try? FileManager.default.removeItem(at: root) }
-        let monitor = PortMonitor(
-            localScanner: MonitorTestScanner(plans: []),
-            terminator: RecordingTerminator(),
-            hostCatalog: SSHHostCatalog(sshDirectory: root),
-            remoteScannerFactory: { _ in MonitorTestScanner(plans: []) },
+    private func makeMonitor(
+        store: InMemoryRemoteServerProfileStore,
+        local: any PortSnapshotScanning,
+        remote: (any PortSnapshotScanning)? = nil,
+        localTerminator: RecordingTerminator = RecordingTerminator(),
+        remoteTerminator: any ProcessTerminating = RecordingTerminator(),
+        factory: (@MainActor (RemoteServerProfile) -> any PortSnapshotScanning)? = nil
+    ) -> PortMonitor {
+        let remoteFactory: @MainActor (RemoteServerProfile) -> any PortSnapshotScanning
+        if let factory {
+            remoteFactory = factory
+        } else {
+            remoteFactory = { _ in remote ?? MonitorTestScanner(plans: []) }
+        }
+        return PortMonitor(
+            localScanner: local,
+            terminator: localTerminator,
+            remoteScannerFactory: remoteFactory,
+            profileStore: store,
+            remoteTerminatorFactory: { _ in remoteTerminator },
+            ownPID: 99,
             clock: NeverMonitorClock()
         )
+    }
 
-        XCTAssertEqual(monitor.sshHosts.map(\.alias), ["prod"])
-        XCTAssertEqual(
-            monitor.availableTargets,
-            [.local, .ssh(SSHHost(alias: "prod"))]
+    private func profile(
+        name: String,
+        host: String = "server.example",
+        enabled: Bool
+    ) -> RemoteServerProfile {
+        RemoteServerProfile(
+            id: UUID(),
+            displayName: name,
+            host: host,
+            username: "tester",
+            isEnabled: enabled
         )
     }
 
-    func testBackoffScheduleIsBoundedAtThirtySeconds() {
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 1), .seconds(2))
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 2), .seconds(4))
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 3), .seconds(8))
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 4), .seconds(16))
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 5), .seconds(30))
-        XCTAssertEqual(PortMonitor.backoffDelay(for: 100), .seconds(30))
+    private func makeRemoteSnapshot(
+        profile: RemoteServerProfile,
+        name: String,
+        port: Int,
+        pid: Int32?
+    ) -> PortSnapshot {
+        PortSnapshot(listeners: [makeRemoteRow(profile: profile, name: name, port: port, pid: pid)], connections: [])
     }
 
-    private func makeSSHDirectory(hosts: [String]) throws -> URL {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("porto-remote-tests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let lines = hosts.map { "Host \($0)" }.joined(separator: "\n") + "\n"
-        try Data(lines.utf8).write(to: root.appendingPathComponent("config"))
-        return root
-    }
-
-    private func makeRemoteSnapshot(name: String, port: Int) -> PortSnapshot {
-        let target = PortTargetID.ssh(alias: name)
-        let row = PortProcess(
-            id: "remote|\(name)|\(port)",
-            origin: .remote(targetID: target, pid: nil),
+    private func makeRemoteRow(
+        profile: RemoteServerProfile,
+        name: String,
+        port: Int,
+        pid: Int32?,
+        id: String? = nil,
+        socketIdentity: String? = nil
+    ) -> PortProcess {
+        PortProcess(
+            id: id ?? "remote|\(profile.id.uuidString)|\(name)|\(port)|\(pid ?? 0)",
+            origin: .remote(targetID: .remote(profileID: profile.id), pid: pid),
             localPort: port,
             transport: .tcp,
             processName: name,
             endpoints: [Endpoint(rawValue: "*:\(port)->*:*", localPort: port, hasRemoteEndpoint: false, socketState: "LISTEN")],
-            activityKind: .listener
+            activityKind: .listener,
+            remoteSocketIdentity: socketIdentity ?? "socket-\(port)"
         )
-        return PortSnapshot(listeners: [row], connections: [])
     }
 
     private func waitUntil(_ predicate: @escaping @MainActor () async -> Bool) async {
-        for _ in 0..<100 {
+        for _ in 0..<200 {
             if await predicate() { return }
             try? await Task.sleep(for: .milliseconds(10))
         }
@@ -207,9 +663,19 @@ private actor MonitorTestScanner: PortSnapshotScanning {
         let plan = plans.isEmpty ? .success(.empty) : plans.removeFirst()
         switch plan {
         case let .success(snapshot):
-            return .success(TargetedPortSnapshot(targetID: request.targetID, sessionGeneration: request.sessionGeneration, snapshot: snapshot, diagnostics: .zero))
+            return .success(TargetedPortSnapshot(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                snapshot: snapshot,
+                diagnostics: .zero
+            ))
         case let .failure(error):
-            return .failure(targetID: request.targetID, sessionGeneration: request.sessionGeneration, error: error, diagnostics: .zero)
+            return .failure(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                error: error,
+                diagnostics: .zero
+            )
         }
     }
 
@@ -219,29 +685,93 @@ private actor MonitorTestScanner: PortSnapshotScanning {
 
 private actor DelayedMonitorScanner: PortSnapshotScanning {
     private let snapshot: PortSnapshot
+    private var scans = 0
     private var didStart = false
     private var continuation: CheckedContinuation<Void, Never>?
 
     init(snapshot: PortSnapshot) { self.snapshot = snapshot }
 
     func scan(_ request: PortScanRequest) async -> PortScanOutcome {
+        scans += 1
         didStart = true
         await withCheckedContinuation { continuation in self.continuation = continuation }
-        return .success(TargetedPortSnapshot(targetID: request.targetID, sessionGeneration: request.sessionGeneration, snapshot: snapshot, diagnostics: .zero))
+        return .success(TargetedPortSnapshot(
+            targetID: request.targetID,
+            sessionGeneration: request.sessionGeneration,
+            snapshot: snapshot,
+            diagnostics: .zero
+        ))
     }
 
     func cancelActiveWork() async {}
+    func scanCount() -> Int { scans }
     func started() -> Bool { didStart }
     func release() { continuation?.resume(); continuation = nil }
 }
 
+private actor CancellationRecordingScanner: PortSnapshotScanning {
+    private var didStart = false
+    private var cancellations = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func scan(_ request: PortScanRequest) async -> PortScanOutcome {
+        didStart = true
+        await withCheckedContinuation { continuation in self.continuation = continuation }
+        return .cancelled
+    }
+
+    func cancelActiveWork() async {
+        cancellations += 1
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func started() -> Bool { didStart }
+    func cancellationCount() -> Int { cancellations }
+}
+
 private actor RecordingTerminator: ProcessTerminating {
     private var stops = 0
-    func stop(row: PortProcess) async -> TerminationOutcome { stops += 1; return .cancelled }
-    func forceKill(row: PortProcess) async -> TerminationOutcome { .cancelled }
+    private let outcome: TerminationOutcome
+
+    init(outcome: TerminationOutcome = .cancelled) {
+        self.outcome = outcome
+    }
+
+    func stop(row: PortProcess) async -> TerminationOutcome {
+        stops += 1
+        return outcome
+    }
+
+    func forceKill(row: PortProcess) async -> TerminationOutcome { outcome }
     func stopCount() -> Int { stops }
 }
 
+private actor DelayedRecordingTerminator: ProcessTerminating {
+    private let outcome: TerminationOutcome
+    private var didStart = false
+    private var continuation: CheckedContinuation<TerminationOutcome, Never>?
+
+    init(outcome: TerminationOutcome) { self.outcome = outcome }
+
+    func stop(row: PortProcess) async -> TerminationOutcome {
+        didStart = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func forceKill(row: PortProcess) async -> TerminationOutcome { outcome }
+    func started() -> Bool { didStart }
+    func release() { continuation?.resume(returning: outcome); continuation = nil }
+}
+
 private extension ScanDiagnostics {
-    static let zero = ScanDiagnostics(stdoutBytes: 0, stderrBytes: 0, validRecords: 0, skippedRecords: 0, durationMilliseconds: 0)
+    static let zero = ScanDiagnostics(
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        validRecords: 0,
+        skippedRecords: 0,
+        durationMilliseconds: 0
+    )
 }

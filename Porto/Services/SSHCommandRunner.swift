@@ -12,13 +12,20 @@ enum SSHCommandTerminationReason: Sendable, Equatable {
 }
 
 enum SSHCommandRunnerFailure: Sendable, Equatable {
-    case invalidAlias
+    case invalidProfile
     case launchFailed
     case timedOut
     case outputTooLarge(stream: SSHCommandOutputStream)
     case readFailed
     case busy
     case cancelled
+}
+
+enum RemoteSSHSignal: Int32, Sendable, Equatable { case term = 15; case kill = 9 }
+
+enum RemoteSSHOperation: Sendable, Equatable {
+    case scan
+    case signal(RemoteSSHSignal, pid: Int32)
 }
 
 struct SSHCommandExecutionResult: Sendable, Equatable {
@@ -33,7 +40,7 @@ struct SSHCommandExecutionResult: Sendable, Equatable {
 }
 
 protocol SSHCommandRunning: Sendable {
-    func run(alias: String) async -> SSHCommandExecutionResult
+    func run(profile: RemoteServerProfile, operation: RemoteSSHOperation) async -> SSHCommandExecutionResult
     func cancelActive() async
 }
 
@@ -43,22 +50,6 @@ actor SSHCommandRunner: SSHCommandRunning {
     static let stderrLimit = 256 * 1024
     static let timeout: Duration = .seconds(5)
     static let remoteCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
-
-    private static let fixedArguments = [
-        "-T",
-        "-n",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=3",
-        "-o", "ConnectionAttempts=1",
-        "-o", "NumberOfPasswordPrompts=0",
-        "-o", "PermitLocalCommand=no",
-        "-o", "ClearAllForwardings=yes",
-        "-o", "RequestTTY=no",
-        "-o", "RemoteCommand=none",
-        "-o", "ControlMaster=no",
-        "-o", "ControlPath=none",
-        "--"
-    ]
 
     private let executableURL: URL
     private let stdoutLimit: Int
@@ -84,24 +75,49 @@ actor SSHCommandRunner: SSHCommandRunning {
         self.environment = childEnvironment
     }
 
-    static func arguments(for alias: String) -> [String]? {
-        guard isValidAlias(alias) else { return nil }
-        return fixedArguments + [alias, remoteCommand]
-    }
-
-    static func isValidAlias(_ alias: String) -> Bool {
-        guard !alias.isEmpty, alias.first != "-" else { return false }
-        return alias.unicodeScalars.allSatisfy { scalar in
-            scalar.value != 0 && !CharacterSet.controlCharacters.contains(scalar)
+    static func arguments(for profile: RemoteServerProfile, operation: RemoteSSHOperation) -> [String]? {
+        guard isValid(profile) else { return nil }
+        var arguments = ["-T", "-n", "-F", "/dev/null", "-l", profile.username, "-p", String(profile.port)]
+        if let identity = profile.identityFilePath { arguments += ["-i", identity] }
+        arguments += [
+            "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ConnectionAttempts=1",
+            "-o", "NumberOfPasswordPrompts=0", "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no", "-o", "PreferredAuthentications=publickey",
+            "-o", "StrictHostKeyChecking=yes", "-o", "PermitLocalCommand=no",
+            "-o", "ClearAllForwardings=yes", "-o", "RequestTTY=no", "-o", "RemoteCommand=none",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none", "--", sshHost(for: profile.host)
+        ]
+        switch operation {
+        case .scan: arguments.append(remoteCommand)
+        case let .signal(signal, pid):
+            guard pid > 0 else { return nil }
+            let name = signal == .term ? "TERM" : "KILL"
+            arguments.append("/bin/kill -\(name) -- \(pid)")
         }
+        return arguments
     }
 
-    func run(alias: String) async -> SSHCommandExecutionResult {
+    private static func sshHost(for host: String) -> String {
+        guard host.first == "[", host.last == "]" else { return host }
+        return String(host.dropFirst().dropLast())
+    }
+
+    private static func isValid(_ profile: RemoteServerProfile) -> Bool {
+        guard (try? profile.validate()) != nil else { return false }
+        guard profile.host.first != "-", profile.username.first != "-" else { return false }
+        if let path = profile.identityFilePath {
+            guard !path.isEmpty, path.first != "-",
+                  path.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else { return false }
+        }
+        return true
+    }
+
+    func run(profile: RemoteServerProfile, operation: RemoteSSHOperation) async -> SSHCommandExecutionResult {
         guard activeProcess == nil else {
             return Self.immediateFailure(.busy)
         }
-        guard let arguments = Self.arguments(for: alias) else {
-            return Self.immediateFailure(.invalidAlias)
+        guard let arguments = Self.arguments(for: profile, operation: operation) else {
+            return Self.immediateFailure(.invalidProfile)
         }
 
         let process = Process()

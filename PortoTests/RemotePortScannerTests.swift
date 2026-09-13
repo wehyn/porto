@@ -3,13 +3,18 @@ import XCTest
 @testable import Porto
 
 final class RemotePortScannerTests: XCTestCase {
-    private let host = SSHHost(alias: "prod")
+    private let profile = RemoteServerProfile(
+        id: UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!,
+        displayName: "Production Linux", host: "prod.example.com", username: "wayne", port: 22
+    )
 
-    func testSuccessfulRemoteOutputProducesReadOnlyTargetedRows() async throws {
+    private var targetID: PortTargetID { PortTargetID(rawValue: "remote:\(profile.id.uuidString)") }
+
+    func testSuccessfulRemoteOutputProducesActionableTargetedRows() async throws {
         let output = "tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"nginx\",pid=42,fd=3)) ino:7 sk:cookie\n"
         let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 9, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 9, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
@@ -19,10 +24,10 @@ final class RemotePortScannerTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
         XCTAssertEqual(row.processName, "nginx")
         XCTAssertEqual(row.pid, 42)
-        XCTAssertFalse(row.isActionable)
+        XCTAssertTrue(row.isActionable)
         XCTAssertTrue(row.isRemote)
-        let aliases = await runner.aliases()
-        XCTAssertEqual(aliases, ["prod"])
+        let operations = await runner.operations()
+        XCTAssertEqual(operations, [.scan])
     }
 
     func testRemotePolicyHidesCommonServicePortsButKeepsCustomPorts() async throws {
@@ -35,8 +40,8 @@ final class RemotePortScannerTests: XCTestCase {
         tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"app\",pid=8080,fd=3)) ino:8080
         """
         let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 2, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 2, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
@@ -57,8 +62,8 @@ final class RemotePortScannerTests: XCTestCase {
         f4bacc4f39f8\tmoneyprinterturbo-api\t0.0.0.0:8080->8080/tcp
         """
         let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 3, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 3, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
@@ -246,8 +251,8 @@ final class RemotePortScannerTests: XCTestCase {
         2b4f94051c6e\tweb\t127.0.0.1:8080->8080/tcp
         """
         let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 4, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 4, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
@@ -258,8 +263,8 @@ final class RemotePortScannerTests: XCTestCase {
 
     func testStatus255UnknownTextRemainsGenericTransportFailure() async {
         let runner = StubSSHCommandRunner(result: execution(stderr: Data("ssh: unknown failure\n".utf8), status: 255))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 1, scanGeneration: 1, trigger: .presentation)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 1, scanGeneration: 1, trigger: .presentation)
 
         let outcome = await scanner.scan(request)
 
@@ -269,8 +274,8 @@ final class RemotePortScannerTests: XCTestCase {
 
     func testDiagnosticFailureMappingNeverExposesRawStderr() async {
         let runner = StubSSHCommandRunner(result: execution(stderr: Data("prod-user@private.example: Permission denied (publickey).\n".utf8), status: 255))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(host).id, sessionGeneration: 1, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 1, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
@@ -282,21 +287,21 @@ final class RemotePortScannerTests: XCTestCase {
 
     func testTargetMismatchDoesNotInvokeRunner() async {
         let runner = StubSSHCommandRunner(result: execution(status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
-        let request = PortScanRequest(targetID: PortTarget.ssh(SSHHost(alias: "other")).id, sessionGeneration: 1, scanGeneration: 1, trigger: .manual)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: PortTargetID(rawValue: "remote:other"), sessionGeneration: 1, scanGeneration: 1, trigger: .manual)
 
         let outcome = await scanner.scan(request)
 
         guard case .failure = outcome else { return XCTFail("expected failure") }
-        let aliases = await runner.aliases()
-        XCTAssertTrue(aliases.isEmpty)
+        let operations = await runner.operations()
+        XCTAssertTrue(operations.isEmpty)
     }
 
     private func scan(_ output: String, sessionGeneration: UInt64 = 1) async throws -> TargetedPortSnapshot {
         let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
-        let scanner = RemotePortScanner(host: host, runner: runner)
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
         let request = PortScanRequest(
-            targetID: PortTarget.ssh(host).id,
+            targetID: targetID,
             sessionGeneration: sessionGeneration,
             scanGeneration: 1,
             trigger: .manual
@@ -363,15 +368,15 @@ final class DockerPortParserTests: XCTestCase {
 
 private actor StubSSHCommandRunner: SSHCommandRunning {
     private let result: SSHCommandExecutionResult
-    private var requestedAliases: [String] = []
+    private var requestedOperations: [RemoteSSHOperation] = []
 
     init(result: SSHCommandExecutionResult) { self.result = result }
 
-    func run(alias: String) async -> SSHCommandExecutionResult {
-        requestedAliases.append(alias)
+    func run(profile: RemoteServerProfile, operation: RemoteSSHOperation) async -> SSHCommandExecutionResult {
+        requestedOperations.append(operation)
         return result
     }
 
     func cancelActive() async {}
-    func aliases() -> [String] { requestedAliases }
+    func operations() -> [RemoteSSHOperation] { requestedOperations }
 }
