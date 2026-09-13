@@ -78,9 +78,172 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         XCTAssertEqual(operations, [.scan])
     }
 
-    private func parsedRow(_ output: Data, targetID: PortTargetID) -> PortProcess? {
+    func testDockerStopUsesContainerSignalForPIDLessMultiPortRow() async throws {
+        let profile = RemoteServerProfile(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            displayName: "Test", host: "example.com", username: "tester"
+        )
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let output = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one
+        tcp LISTEN 0 128 0.0.0.0:8443 0.0.0.0:* ino:8 sk:two
+        __PORTO_DOCKER__
+        0123456789ab\tweb\t0.0.0.0:8080->8080/tcp, 0.0.0.0:8443->8443/tcp
+        """.utf8)
+        let row: PortProcess
+        guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID),
+              let parsedRow = parsed.dockerPorts.applying(to: parsed.snapshot).listeners.first else {
+            return XCTFail("expected Docker row")
+        }
+        row = PortProcess(
+            id: parsedRow.id, origin: parsedRow.origin, localPorts: parsedRow.localPorts,
+            transports: parsedRow.transports, processName: parsedRow.processName,
+            endpoints: parsedRow.endpoints, activityKind: parsedRow.activityKind,
+            remoteSocketIdentity: parsedRow.remoteSocketIdentity,
+            source: parsedRow.source, controlTarget: parsedRow.controlTarget,
+            isDockerPublished: parsedRow.isDockerPublished
+        )
+        let runner = TerminatorRunner(scanOutputs: [output, Data()])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        XCTAssertNil(row.pid)
+        XCTAssertTrue(row.isActionable)
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+        XCTAssertEqual(result, .exited)
+        XCTAssertEqual(operations, [
+            .scan, .signalContainer(.term, containerID: "0123456789ab"), .scan
+        ])
+    }
+
+    func testDockerMetadataLossWithSurvivingSocketDoesNotLookExitedOrSignalHostPID() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let dockerOutput = dockerOutput(port: 8080)
+        let socketOnlyOutput = Data("tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one\n".utf8)
+        let row = try XCTUnwrap(parsedRow(dockerOutput, targetID: targetID, applyingDocker: true))
+        let runner = TerminatorRunner(scanOutputs: [socketOnlyOutput])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.revalidationFailed))
+        XCTAssertEqual(operations, [.scan])
+    }
+
+    func testDockerMetadataLossDuringPostTermPollingKeepsForceKillAvailable() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let dockerOutput = dockerOutput(port: 8080)
+        let socketOnlyOutput = Data("tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one\n".utf8)
+        let row = try XCTUnwrap(parsedRow(dockerOutput, targetID: targetID, applyingDocker: true))
+        let runner = TerminatorRunner(scanOutputs: [dockerOutput, socketOnlyOutput])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .forceKillAvailable)
+        XCTAssertEqual(operations, [.scan, .signalContainer(.term, containerID: "0123456789ab"), .scan])
+    }
+
+    func testForceKillWithMissingDockerMetadataNeverSignalsAHostPID() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let dockerOutput = dockerOutput(port: 8080)
+        let socketOnlyOutput = Data("tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one\n".utf8)
+        let row = try XCTUnwrap(parsedRow(dockerOutput, targetID: targetID, applyingDocker: true))
+        let runner = TerminatorRunner(scanOutputs: [socketOnlyOutput])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.forceKill(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.revalidationFailed))
+        XCTAssertEqual(operations, [.scan])
+    }
+
+    func testDockerPermissionFailureIsClearAndNeverFallsBackToHostPID() async throws {
+        let profile = RemoteServerProfile(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            displayName: "Test", host: "example.com", username: "tester"
+        )
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let output = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one
+        __PORTO_DOCKER__
+        0123456789ab\tweb\t0.0.0.0:8080->8080/tcp
+        """.utf8)
+        guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID),
+              let row = parsed.dockerPorts.applying(to: parsed.snapshot).listeners.first else {
+            return XCTFail("expected Docker row")
+        }
+        let signalFailure = SSHCommandExecutionResult(
+            stdout: Data(),
+            stderr: Data("permission denied while trying to connect to the Docker daemon socket".utf8),
+            terminationStatus: 1,
+            terminationReason: .exit,
+            failure: nil,
+            durationMilliseconds: 1
+        )
+        let runner = TerminatorRunner(scanOutputs: [output], signalResult: signalFailure)
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.dockerPermissionDenied))
+        XCTAssertEqual(operations, [
+            .scan, .signalContainer(.term, containerID: "0123456789ab")
+        ])
+    }
+
+    func testDockerUnavailableFailureIsClear() async throws {
+        let profile = RemoteServerProfile(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            displayName: "Test", host: "example.com", username: "tester"
+        )
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let output = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:one
+        __PORTO_DOCKER__
+        0123456789ab\tweb\t0.0.0.0:8080->8080/tcp
+        """.utf8)
+        guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID),
+              let row = parsed.dockerPorts.applying(to: parsed.snapshot).listeners.first else {
+            return XCTFail("expected Docker row")
+        }
+        let signalFailure = SSHCommandExecutionResult(
+            stdout: Data(),
+            stderr: Data("docker: command not found".utf8),
+            terminationStatus: 127,
+            terminationReason: .exit,
+            failure: nil,
+            durationMilliseconds: 1
+        )
+        let runner = TerminatorRunner(scanOutputs: [output], signalResult: signalFailure)
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+
+        XCTAssertEqual(result, .failed(.dockerUnavailable))
+    }
+
+    private func parsedRow(_ output: Data, targetID: PortTargetID, applyingDocker: Bool = false) -> PortProcess? {
         guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID) else { return nil }
-        return parsed.snapshot.listeners.first
+        return (applyingDocker ? parsed.dockerPorts.applying(to: parsed.snapshot) : parsed.snapshot).listeners.first
+    }
+
+    private func testProfile() -> RemoteServerProfile {
+        RemoteServerProfile(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            displayName: "Test", host: "example.com", username: "tester"
+        )
+    }
+
+    private func dockerOutput(port: Int) -> Data {
+        Data("tcp LISTEN 0 128 0.0.0.0:\(port) 0.0.0.0:* ino:7 sk:one\n__PORTO_DOCKER__\n0123456789ab\tweb\t0.0.0.0:\(port)->\(port)/tcp\n".utf8)
     }
 
     private func makeRemoteRow(pid: Int32?, socketIdentity: String?) -> PortProcess {
@@ -126,16 +289,24 @@ private struct AdvancingClock: MonitorSleeping {
 
 private actor TerminatorRunner: SSHCommandRunning {
     var scanOutputs: [Data]
+    let signalResult: SSHCommandExecutionResult
     var seen: [RemoteSSHOperation] = []
 
-    init(scanOutputs: [Data]) { self.scanOutputs = scanOutputs }
+    init(scanOutputs: [Data], signalResult: SSHCommandExecutionResult? = nil) {
+        self.scanOutputs = scanOutputs
+        self.signalResult = signalResult ?? SSHCommandExecutionResult(
+            stdout: Data(), stderr: Data(), terminationStatus: 0,
+            terminationReason: .exit, failure: nil, durationMilliseconds: 1
+        )
+    }
 
     func run(profile: RemoteServerProfile, operation: RemoteSSHOperation) async -> SSHCommandExecutionResult {
         seen.append(operation)
         let stdout: Data
         switch operation {
         case .scan: stdout = scanOutputs.isEmpty ? Data() : scanOutputs.removeFirst()
-        case .signal: stdout = Data()
+        case .signal, .signalContainer:
+            return signalResult
         }
         return SSHCommandExecutionResult(stdout: stdout, stderr: Data(), terminationStatus: 0,
                                          terminationReason: .exit, failure: nil, durationMilliseconds: 1)

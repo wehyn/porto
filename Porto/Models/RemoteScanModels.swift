@@ -19,6 +19,25 @@ struct TargetedPortSnapshot: Sendable, Equatable {
     let sessionGeneration: UInt64
     let snapshot: PortSnapshot
     let diagnostics: ScanDiagnostics
+    /// The post-Docker-label snapshot before visibility filtering. Remote
+    /// termination uses this to distinguish an exited container from a live
+    /// host socket whose Docker metadata is temporarily unavailable. It is
+    /// intentionally not used as the UI snapshot.
+    let revalidationSnapshot: PortSnapshot?
+
+    init(
+        targetID: PortTargetID,
+        sessionGeneration: UInt64,
+        snapshot: PortSnapshot,
+        diagnostics: ScanDiagnostics,
+        revalidationSnapshot: PortSnapshot? = nil
+    ) {
+        self.targetID = targetID
+        self.sessionGeneration = sessionGeneration
+        self.snapshot = snapshot
+        self.diagnostics = diagnostics
+        self.revalidationSnapshot = revalidationSnapshot
+    }
 }
 
 enum RemoteScanFailure: Error, Equatable, Sendable {

@@ -62,7 +62,8 @@ actor RemotePortScanner: PortSnapshotScanning {
                 targetID: request.targetID,
                 sessionGeneration: request.sessionGeneration,
                 snapshot: visibilityPolicy.filtering(dockerLabeledSnapshot),
-                diagnostics: diagnostics
+                diagnostics: diagnostics,
+                revalidationSnapshot: dockerLabeledSnapshot
             ))
         case .failure:
             return failure(.malformedOutput, request: request, diagnostics: base)

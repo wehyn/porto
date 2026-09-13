@@ -56,6 +56,28 @@ final class RemoteServerProfileTests: XCTestCase {
         XCTAssertFalse(profile.isEnabled)
     }
 
+    func testSSHAddressCombinesUsernameAndHostAndFormatsIPv6() {
+        let profile = RemoteServerProfile(displayName: "Dev", host: "192.168.2.28", username: "dei")
+        XCTAssertEqual(profile.sshAddress, "dei@192.168.2.28")
+
+        let ipv6 = RemoteServerProfile(displayName: "Dev", host: "2001:db8::10", username: "dei")
+        XCTAssertEqual(ipv6.sshAddress, "dei@[2001:db8::10]")
+    }
+
+    func testSSHAddressParserAcceptsUserAtHostAndRejectsUnsafeValues() {
+        XCTAssertEqual(
+            RemoteServerProfile.parseSSHAddress("dei@192.168.2.28")?.username,
+            "dei"
+        )
+        XCTAssertEqual(
+            RemoteServerProfile.parseSSHAddress("dei@[2001:db8::10]")?.host,
+            "[2001:db8::10]"
+        )
+        for value in ["192.168.2.28", "@host", "dei@", "dei@host name", "dei@host;exit", "dei@host@other"] {
+            XCTAssertNil(RemoteServerProfile.parseSSHAddress(value), "Expected invalid SSH address: \(value)")
+        }
+    }
+
     func testValidationRejectsUnsafeValuesAndPortBounds() {
         let base = RemoteServerProfile(displayName: "Dev", host: "host", username: "user")
         for invalid in ["-host", "host name", "user@host", "host;rm -rf", "host\0x", "host\n", "[]", "example..com", "256.1.1.1", "2001:db8::1::2"] {

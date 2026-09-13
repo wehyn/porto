@@ -5,7 +5,7 @@ struct PortProcessRow: View {
     @ObservedObject var monitor: PortMonitor
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.processName)
                     .font(.body.weight(.medium))
@@ -24,7 +24,8 @@ struct PortProcessRow: View {
         .focusable()
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilitySummary)
-        .padding(.vertical, 2)
+            .padding(.vertical, 5)
+            .frame(minHeight: 44)
     }
 
     private var accessibilitySummary: String {
@@ -57,13 +58,22 @@ struct PortProcessRow: View {
         row.transports.map(\.rawValue).joined(separator: " and ")
     }
 
+    private var controlTargetDescription: String {
+        if row.isDockerContainer {
+            return "container \(row.processName)"
+        }
+        return "process \(row.processName) (PID \(row.pid ?? 0))"
+    }
+
     @ViewBuilder
     private var actions: some View {
         if !row.isActionable && row.isRemote {
             Image(systemName: "lock.fill")
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Remote process controls disabled")
-                .help("Porto could not verify this remote process identity, so process controls are disabled.")
+                .help(row.isDockerContainer
+                    ? "Porto could not verify this remote container identity or Docker access, so container controls are disabled."
+                    : "Porto could not verify this remote process identity, so process controls are disabled.")
         } else if !row.isActionable {
             Image(systemName: "lock.fill")
                 .foregroundStyle(.secondary)
@@ -79,7 +89,7 @@ struct PortProcessRow: View {
             case .inProgress:
                 ProgressView()
                     .controlSize(.small)
-                    .frame(width: 22, height: 22)
+                    .frame(width: 44, height: 44)
                     .accessibilityLabel("Stopping \(row.processName)")
             case .forceKillAvailable:
                 stopButton
@@ -99,13 +109,13 @@ struct PortProcessRow: View {
         } label: {
             Image(systemName: "xmark")
                 .font(.caption.weight(.bold))
-                .frame(width: 22, height: 22)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
         .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Stop \(row.processName)")
-        .help("Send SIGTERM to process \(row.processName) (PID \(row.pid ?? 0)). This can close all ports owned by the process.")
+        .help("Send SIGTERM to \(controlTargetDescription). This can close all ports owned by the \(row.isDockerContainer ? "container" : "process").")
     }
 
     private var forceKillButton: some View {
@@ -115,12 +125,12 @@ struct PortProcessRow: View {
             Image(systemName: "bolt.fill")
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.red)
-                .frame(width: 22, height: 22)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.borderless)
         .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
         .accessibilityLabel("Force kill \(row.processName)")
-        .help("Force kill \(row.processName) (PID \(row.pid ?? 0)). SIGKILL prevents cleanup and can lose unsaved work.")
+        .help("Force kill \(controlTargetDescription). SIGKILL prevents cleanup and can lose unsaved work.")
     }
 
     private func failureIndicator(_ failure: TerminationFailure) -> some View {

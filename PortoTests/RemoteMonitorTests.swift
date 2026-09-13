@@ -181,6 +181,54 @@ final class RemoteMonitorTests: XCTestCase {
         XCTAssertEqual(result, .refusedDisabled)
         let scanCount = await scanner.count()
         XCTAssertEqual(scanCount, 0)
+        XCTAssertEqual(store.profiles.first?.id, disabled.id)
+        XCTAssertFalse(store.profiles.first?.isEnabled ?? true)
+    }
+
+    func testDisabledTestConnectionRefusesWithoutAProfileStore() async throws {
+        let scanner = NoStoreMonitorScanner()
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: RecordingTerminator(),
+            ownPID: 99,
+            clock: NeverMonitorClock()
+        )
+
+        let result = await monitor.testConnection(for: profile(name: "Disabled", enabled: false))
+
+        XCTAssertEqual(result, .refusedDisabled)
+        let scanCount = await scanner.scanCount()
+        XCTAssertEqual(scanCount, 0)
+    }
+
+    func testDraftTestConnectionInvokesScannerWithoutSavingOrEnablingDraft() async throws {
+        let draft = profile(name: "New server", enabled: false)
+        let store = InMemoryRemoteServerProfileStore()
+        let scanner = MonitorTestScanner(plans: [.success(.empty)])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: []), remote: scanner)
+
+        let result = await monitor.testDraftConnection(for: draft)
+
+        XCTAssertEqual(result, .success)
+        let scanCount = await scanner.count()
+        XCTAssertEqual(scanCount, 1)
+        XCTAssertTrue(store.profiles.isEmpty)
+        XCTAssertFalse(draft.isEnabled)
+    }
+
+    func testSavedDisabledDraftCanBeTestedWithoutChangingStoredEnablement() async throws {
+        let draft = profile(name: "Disabled server", enabled: false)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(draft)
+        let scanner = MonitorTestScanner(plans: [.success(.empty)])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: []), remote: scanner)
+
+        let result = await monitor.testDraftConnection(for: draft)
+
+        XCTAssertEqual(result, .success)
+        let scanCount = await scanner.count()
+        XCTAssertEqual(scanCount, 1)
+        XCTAssertFalse(store.profiles.first?.isEnabled ?? true)
     }
 
     func testTestConnectionWaitsForActiveScanBeforeStarting() async throws {
@@ -220,7 +268,7 @@ final class RemoteMonitorTests: XCTestCase {
         defer { monitor.setPresented(false) }
 
         monitor.setPresented(true)
-        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
         monitor.selectTarget(.remote(profile))
         await waitUntil { await remote.count() == 1 && !monitor.isScanning }
         guard let row = monitor.listenerRows.first else { return XCTFail("expected a remote row") }
@@ -444,6 +492,131 @@ final class RemoteMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.terminationState(for: row), .inProgress)
         await waitUntil { monitor.terminationState(for: row) == .forceKillAvailable }
         XCTAssertNil(monitor.activeRemoteTerminationKey)
+    }
+
+    func testRemoteTerminationStateIsSharedAcrossRowsWithTheSameProcessOwner() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let first = makeRemoteRow(profile: profile, name: "owned", port: 8200, pid: 77)
+        let second = makeRemoteRow(profile: profile, name: "owned", port: 8201, pid: 77)
+        let sharedSnapshot = PortSnapshot(listeners: [first, second], connections: [])
+        let remote = MonitorTestScanner(plans: [.success(sharedSnapshot), .success(sharedSnapshot)])
+        let terminator = RecordingTerminator(outcome: .forceKillAvailable)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        monitor.requestStop(for: first)
+
+        await waitUntil { await terminator.stopCount() == 1 }
+        XCTAssertEqual(monitor.terminationState(for: first), .forceKillAvailable)
+        XCTAssertEqual(monitor.terminationState(for: second), .forceKillAvailable)
+    }
+
+    func testPIDLessDockerRowsAreActionableAndAllOwnerRowsDisappearOnExit() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let targetID = PortTargetID.remote(profileID: profile.id)
+        let containerID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        let first = PortProcess(
+            id: "docker-first", origin: .remote(targetID: targetID, pid: nil), localPort: 8200,
+            transport: .tcp, processName: "web", endpoints: [], activityKind: .listener,
+            source: .dockerContainer(containerID: containerID),
+            controlTarget: .remoteDocker(targetID: targetID, containerID: containerID), isDockerPublished: true
+        )
+        let second = PortProcess(
+            id: "docker-second", origin: .remote(targetID: targetID, pid: nil), localPort: 8201,
+            transport: .tcp, processName: "web", endpoints: [], activityKind: .connection,
+            source: .dockerContainer(containerID: containerID),
+            controlTarget: .remoteDocker(targetID: targetID, containerID: containerID), isDockerPublished: true
+        )
+        let remote = MonitorTestScanner(plans: [
+            .success(PortSnapshot(listeners: [first], connections: [second])),
+            .success(.empty)
+        ])
+        let terminator = RecordingTerminator(outcome: .exited)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isTerminationDisabled(for: first))
+        monitor.requestStop(for: first)
+
+        await waitUntil { await remote.count() == 2 && monitor.listenerRows.isEmpty && monitor.connectionRows.isEmpty }
+        let stopCount = await terminator.stopCount()
+        XCTAssertEqual(stopCount, 1)
+    }
+
+    func testRemoteExitRemovesLockedSiblingsButPreservesAnotherOwner() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let targetID = PortTargetID.remote(profileID: profile.id)
+        let actionable = makeRemoteRow(profile: profile, name: "owned", port: 8200, pid: 77)
+        let locked = PortProcess(
+            id: "remote-locked", origin: .remote(targetID: targetID, pid: 77), localPort: 8201,
+            transport: .tcp, processName: "owned", endpoints: [], activityKind: .connection,
+            remoteSocketIdentity: nil, source: .remoteProcess,
+            controlTarget: .remoteProcess(targetID: targetID, pid: 77)
+        )
+        let unrelated = makeRemoteRow(profile: profile, name: "other", port: 8202, pid: 78)
+        let snapshot = PortSnapshot(listeners: [actionable, unrelated], connections: [locked])
+        let remote = MonitorTestScanner(plans: [
+            .success(snapshot),
+            .success(PortSnapshot(listeners: [unrelated], connections: []))
+        ])
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: RecordingTerminator(outcome: .exited))
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        monitor.requestStop(for: actionable)
+
+        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
+        XCTAssertEqual(monitor.listenerRows.map(\.id), [unrelated.id])
+        XCTAssertTrue(monitor.connectionRows.isEmpty)
+    }
+
+    func testCanceledRemoteTerminationAfterStartClearsBarrierAcrossCloseAndFreshScan() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let row = makeRemoteRow(profile: profile, name: "owned", port: 8200, pid: 77)
+        let remote = MonitorTestScanner(plans: [.success(PortSnapshot(listeners: [row], connections: [])), .success(.empty)])
+        let terminator = DelayedRecordingTerminator(outcome: .forceKillAvailable)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        let selectedRow = try XCTUnwrap(monitor.listenerRows.first)
+        monitor.requestStop(for: selectedRow)
+        await waitUntil { await terminator.started() }
+
+        monitor.setPresented(false)
+        await terminator.release()
+        await waitUntil { monitor.activeRemoteTerminationKey == nil && monitor.terminationState(for: selectedRow) == nil }
+        XCTAssertNil(monitor.activeRemoteTerminationKey)
+
+        monitor.setPresented(true)
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
+        XCTAssertEqual(monitor.selectedTarget, .remote(profile))
     }
 
     func testStableDockerRowIDDoesNotRetainForceKillForReplacementIdentity() async throws {
@@ -681,6 +854,22 @@ private actor MonitorTestScanner: PortSnapshotScanning {
 
     func cancelActiveWork() async {}
     func count() -> Int { calls }
+}
+
+private actor NoStoreMonitorScanner: PortScanning {
+    private var calls = 0
+
+    func scan(generation: UInt64) async -> ScanOutcome {
+        calls += 1
+        return .success(snapshot: .empty, diagnostics: .zero)
+    }
+
+    func validateSocket(for row: PortProcess) async -> SocketValidationResult {
+        .socketMissing
+    }
+
+    func cancelActiveWork() async {}
+    func scanCount() -> Int { calls }
 }
 
 private actor DelayedMonitorScanner: PortSnapshotScanning {

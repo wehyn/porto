@@ -104,23 +104,6 @@ final class PortMonitor: ObservableObject {
         return l == r ? lhs.id.uuidString < rhs.id.uuidString : l < r
     }
 
-    var targetStatusText: String {
-        if !isRemoteTarget {
-            if isScanning && !hasSnapshot { return "Scanning This Mac…" }
-            if isScanning { return "Refreshing…" }
-            return "Local inspection"
-        }
-        if isScanning && !hasSnapshot { return "Connecting over SSH…" }
-        if isScanning { return isStale ? "Reconnecting… · showing in-memory results" : "Refreshing…" }
-        if let remoteFailure {
-            var message = remoteFailure.userMessage + (hasSnapshot ? " Showing last results." : "")
-            if let nextRetrySeconds { message += " Retrying in " + String(nextRetrySeconds) + "s." }
-            return message
-        }
-        if hasSnapshot { return "Available over SSH · updated just now" }
-        return "Ready to connect"
-    }
-
     func setPresented(_ presented: Bool) {
         guard isPresented != presented else { return }
         isPresented = presented
@@ -208,20 +191,55 @@ final class PortMonitor: ObservableObject {
 
     func testConnection(for profile: RemoteServerProfile) async -> RemoteConnectionTestResult {
         guard profile.isEnabled else { return .refusedDisabled }
-        let requiresSavedAuthorization = profileStore?.profiles.contains(where: { $0.id == profile.id }) ?? false
-        while !canStartConnectionTest(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) {
-            guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) else {
+        return await testConnection(for: profile, requiresSavedAuthorization: profileStore != nil)
+    }
+
+    /// Tests an editor draft without saving it or treating it as a selected
+    /// profile. Unlike the menu/settings-row API, a draft may be disabled
+    /// because the editor's Test Connection action is an explicit capability
+    /// check rather than an enablement change.
+    func testDraftConnection(for profile: RemoteServerProfile) async -> RemoteConnectionTestResult {
+        await testConnection(for: profile, requiresSavedAuthorization: false, allowDisabled: true)
+    }
+
+    private func testConnection(
+        for profile: RemoteServerProfile,
+        requiresSavedAuthorization: Bool,
+        allowDisabled: Bool = false
+    ) async -> RemoteConnectionTestResult {
+        while !canStartConnectionTest(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ) {
+            guard profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            ) else {
                 return .refusedDisabled
             }
             do {
                 try await Task.sleep(for: .milliseconds(10))
             } catch {
-                return profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+                return profileAuthorization(
+                    for: profile,
+                    requiresSavedAuthorization: requiresSavedAuthorization,
+                    allowDisabled: allowDisabled
+                )
                     ? .failed(.cancelled) : .refusedDisabled
             }
         }
-        guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization), !Task.isCancelled else {
-            return profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+        guard profileAuthorization(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ), !Task.isCancelled else {
+            return profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            )
                 ? .failed(.cancelled) : .refusedDisabled
         }
 
@@ -243,7 +261,11 @@ final class PortMonitor: ObservableObject {
         } onCancel: {
             Task { await scanner.cancelActiveWork() }
         }
-        guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) else {
+        guard profileAuthorization(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ) else {
             return .refusedDisabled
         }
         if Task.isCancelled { return .failed(.cancelled) }
@@ -258,14 +280,19 @@ final class PortMonitor: ObservableObject {
 
     private func canStartConnectionTest(
         for profile: RemoteServerProfile,
-        requiresSavedAuthorization: Bool
+        requiresSavedAuthorization: Bool,
+        allowDisabled: Bool = false
     ) -> Bool {
         !connectionTestActive
             && scanToken == nil
             && activeTerminationIdentity == nil
             && activeRemoteTerminationKey == nil
             && forceKillPrompt == nil
-            && profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+            && profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            )
     }
 
     private func cancelActiveConnectionTest() {
@@ -275,14 +302,15 @@ final class PortMonitor: ObservableObject {
 
     private func profileAuthorization(
         for profile: RemoteServerProfile,
-        requiresSavedAuthorization: Bool = false
+        requiresSavedAuthorization: Bool = false,
+        allowDisabled: Bool = false
     ) -> Bool {
-        guard profile.isEnabled else { return false }
+        guard allowDisabled || profile.isEnabled else { return false }
         guard let profileStore else { return true }
         guard let saved = profileStore.profiles.first(where: { $0.id == profile.id }) else {
             return !requiresSavedAuthorization
         }
-        return saved.isEnabled
+        return allowDisabled || saved.isEnabled
     }
 
     private func switchTarget(_ target: PortTarget, bypassPicker: Bool = false) {
@@ -354,7 +382,8 @@ final class PortMonitor: ObservableObject {
                 self.finishTermination(.cancelled, identity: identity, token: token)
                 return
             }
-            self.finishTermination(await terminator.stop(row: row), identity: identity, token: token)
+            let outcome = await terminator.stop(row: row)
+            self.finishTermination(Task.isCancelled ? .cancelled : outcome, identity: identity, token: token)
         }
     }
 
@@ -374,7 +403,7 @@ final class PortMonitor: ObservableObject {
 
     func confirmForceKill() {
         if let row = forceKillPrompt, row.isRemote { confirmRemoteForceKill(row); return }
-        guard let row = forceKillPrompt, let identity = row.localIdentity,
+        guard isPresented, let row = forceKillPrompt, let identity = row.localIdentity,
               terminationStates[identity] == .forceKillAvailable,
               !connectionTestActive, activeTerminationIdentity == nil, activeRemoteTerminationKey == nil else {
             forceKillPrompt = nil
@@ -395,14 +424,24 @@ final class PortMonitor: ObservableObject {
                 self.finishTermination(.cancelled, identity: identity, token: token)
                 return
             }
-            self.finishTermination(await terminator.forceKill(row: row), identity: identity, token: token)
+            let outcome = await terminator.forceKill(row: row)
+            self.finishTermination(Task.isCancelled ? .cancelled : outcome, identity: identity, token: token)
         }
     }
 
     private func remoteTerminationKey(for row: PortProcess) -> String? {
-        guard case let .remote(targetID, pid) = row.origin, pid ?? 0 > 0,
-              targetID == selectedTarget.id else { return nil }
-        return "\(targetID.rawValue)|\(row.id)"
+        guard row.isRemote, row.isActionable else { return nil }
+        switch row.controlTarget {
+        case let .remoteProcess(targetID, pid):
+            guard targetID == selectedTarget.id, let pid, pid > 0 else { return nil }
+            return "process|\(targetID.rawValue)|\(pid)"
+        case let .remoteDocker(targetID, containerID):
+            guard targetID == selectedTarget.id,
+                  let containerID = DockerContainerID.validated(containerID) else { return nil }
+            return "docker|\(targetID.rawValue)|\(containerID)"
+        default:
+            return nil
+        }
     }
 
     private func selectedRemoteProfile() -> RemoteServerProfile? {
@@ -427,12 +466,13 @@ final class PortMonitor: ObservableObject {
             guard let self else { return }
             await self.waitForScanToFinish()
             guard !Task.isCancelled else { self.finishRemoteTermination(.cancelled, key: key, token: token); return }
-            self.finishRemoteTermination(await terminator.stop(row: row), key: key, token: token, targetID: targetID)
+            let outcome = await terminator.stop(row: row)
+            self.finishRemoteTermination(Task.isCancelled ? .cancelled : outcome, key: key, token: token, targetID: targetID)
         }
     }
 
     private func confirmRemoteForceKill(_ row: PortProcess) {
-        guard row.isActionable, let profile = selectedRemoteProfile(), let key = remoteTerminationKey(for: row),
+        guard row.isActionable, isPresented, let profile = selectedRemoteProfile(), let key = remoteTerminationKey(for: row),
               remoteTerminationState(for: row, key: key) == .forceKillAvailable, !connectionTestActive,
               activeRemoteTerminationKey == nil else { return }
         guard let terminator = remoteTerminatorFactory?(profile) else { return }
@@ -448,37 +488,61 @@ final class PortMonitor: ObservableObject {
             guard let self else { return }
             await self.waitForScanToFinish()
             guard !Task.isCancelled else { self.finishRemoteTermination(.cancelled, key: key, token: token); return }
-            self.finishRemoteTermination(await terminator.forceKill(row: row), key: key, token: token, targetID: targetID)
+            let outcome = await terminator.forceKill(row: row)
+            self.finishRemoteTermination(Task.isCancelled ? .cancelled : outcome, key: key, token: token, targetID: targetID)
         }
     }
 
     private func finishRemoteTermination(_ outcome: TerminationOutcome, key: String, token: UUID, targetID: PortTargetID? = nil) {
-        guard terminationToken == token, activeRemoteTerminationKey == key,
-              targetID == nil || targetID == selectedTarget.id else { return }
+        guard terminationToken == token, activeRemoteTerminationKey == key else { return }
+        // Cancellation is authoritative even after the target or popover has
+        // changed. The canceled task must release the barrier it established;
+        // otherwise a later session can remain permanently blocked. Results
+        // that are not canceled still require the original target below.
+        if case .cancelled = outcome {
+            clearRemoteTerminationBarrier(forKey: key)
+            return
+        }
+        guard targetID == nil || targetID == selectedTarget.id else {
+            // A cancellation can race with the final non-cancelled outcome.
+            // The token/key still prove that this completion owns the barrier,
+            // but the captured target makes its result stale.
+            clearRemoteTerminationBarrier(forKey: key)
+            return
+        }
         terminationTask = nil; terminationToken = nil; activeRemoteTerminationKey = nil
         switch outcome {
-        case .exited: removeRemoteTerminationState(forKey: key); if isPresented { pendingRefresh = true }
+        case .exited:
+            let owner = remoteTerminationRows[key]
+            removeRemoteTerminationState(forKey: key)
+            if let owner { removeRemoteRows(for: owner, targetID: targetID ?? selectedTarget.id) }
+            if isPresented { pendingRefresh = true }
         case .forceKillAvailable:
             if let row = remoteTerminationRows[key] { setRemoteTerminationState(.forceKillAvailable, for: row, key: key) }
         case let .failed(error):
             if let row = remoteTerminationRows[key] { setRemoteTerminationState(.failed(error), for: row, key: key) }
             if isPresented { pendingRefresh = true }
-        case .cancelled: removeRemoteTerminationState(forKey: key)
+        case .cancelled: break
         }
+        drainPendingRefreshIfPossible()
+    }
+
+    private func clearRemoteTerminationBarrier(forKey key: String) {
+        terminationTask = nil
+        terminationToken = nil
+        activeRemoteTerminationKey = nil
+        removeRemoteTerminationState(forKey: key)
         drainPendingRefreshIfPossible()
     }
 
     private func cancelRemoteWorkAndClearState() {
         cancelActiveConnectionTest()
-        if selectedTarget.isRemote {
-            cancelActiveScan()
-            if activeRemoteTerminationKey != nil {
-                terminationTask?.cancel()
-                terminationTask = nil
-                terminationToken = nil
-                activeRemoteTerminationKey = nil
-            }
-        }
+        cancelActiveScan()
+        terminationTask?.cancel()
+        // Keep the in-flight markers until each canceled task reaches its
+        // completion handler. This is the cancellation barrier that prevents
+        // a close/reopen or target switch from starting overlapping work.
+        terminationStates.removeAll()
         remoteTerminationStates.removeAll()
         remoteTerminationRows.removeAll()
         forceKillPrompt = nil
@@ -644,6 +708,9 @@ final class PortMonitor: ObservableObject {
 
     private func cancelActiveScan() {
         scanTask?.cancel()
+        // Do not clear scanToken/scanTask here. The canceled scanner may still
+        // own an SSH or lsof child; finishScan clears the marker only after
+        // that task has actually returned.
         let scanner = activeScanner
         Task { await scanner?.cancelActiveWork() }
     }
@@ -681,13 +748,10 @@ final class PortMonitor: ObservableObject {
 
     private func clearTerminationStatesForMissingRows(in snapshot: PortSnapshot, targetID: PortTargetID) {
         guard targetID == .local else {
-            let currentRows = snapshot.allRows.reduce(into: [String: PortProcess]()) { rows, row in
-                guard row.isRemote, case let .remote(rowTargetID, pid) = row.origin,
-                      pid ?? 0 > 0, rowTargetID == targetID else { return }
-                rows["\(targetID.rawValue)|\(row.id)"] = row
-            }
             for key in remoteTerminationStates.keys {
-                guard let current = currentRows[key], let terminated = remoteTerminationRows[key],
+                guard let terminated = remoteTerminationRows[key],
+                      let current = snapshot.allRows.first(where: { $0.id == terminated.id }),
+                      remoteTerminationKey(for: current) == key,
                       equivalentRemoteTerminationIdentity(current, terminated) else {
                     removeRemoteTerminationState(forKey: key)
                     continue
@@ -695,8 +759,9 @@ final class PortMonitor: ObservableObject {
             }
             if let prompt = forceKillPrompt, prompt.isRemote {
                 guard let promptKey = remoteTerminationKey(for: prompt),
-                      let current = currentRows[promptKey],
                       let terminated = remoteTerminationRows[promptKey],
+                      let current = snapshot.allRows.first(where: { $0.id == terminated.id }),
+                      remoteTerminationKey(for: current) == promptKey,
                       equivalentRemoteTerminationIdentity(prompt, terminated),
                       equivalentRemoteTerminationIdentity(current, terminated) else {
                     forceKillPrompt = nil
@@ -711,7 +776,12 @@ final class PortMonitor: ObservableObject {
     }
 
     private func remoteTerminationState(for row: PortProcess, key: String) -> TerminationUIState? {
-        guard let terminated = remoteTerminationRows[key], equivalentRemoteTerminationIdentity(row, terminated) else {
+        guard let terminated = remoteTerminationRows[key],
+              let current = currentVisibleRemoteRows(for: key).first(where: { $0.id == terminated.id }),
+              equivalentRemoteTerminationIdentity(current, terminated),
+              row.controlTarget == terminated.controlTarget,
+              row.source == terminated.source,
+              row.processName == terminated.processName else {
             return nil
         }
         return remoteTerminationStates[key]
@@ -727,13 +797,61 @@ final class PortMonitor: ObservableObject {
         remoteTerminationRows.removeValue(forKey: key)
     }
 
-    /// Docker row IDs may survive a process/socket replacement. Ignore the
-    /// stable row ID and compare the complete remote termination identity.
+    private func currentVisibleRemoteRows(for key: String) -> [PortProcess] {
+        (listenerRows + connectionRows).filter { remoteTerminationKey(for: $0) == key }
+    }
+
+    private func removeRemoteRows(for owner: PortProcess, targetID: PortTargetID) {
+        guard owner.isRemote else { return }
+        let belongsToOwner: (PortProcess) -> Bool = { [self] row in
+            remoteTerminationOwnerMatches(row, owner: owner, targetID: targetID)
+        }
+        listenerRows.removeAll(where: belongsToOwner)
+        connectionRows.removeAll(where: belongsToOwner)
+        guard var state = targetStates[targetID], let snapshot = state.snapshot else { return }
+        state.snapshot = PortSnapshot(
+            listeners: snapshot.listeners.filter { !belongsToOwner($0) },
+            connections: snapshot.connections.filter { !belongsToOwner($0) }
+        )
+        targetStates[targetID] = state
+    }
+
+    private func remoteTerminationOwnerMatches(_ row: PortProcess, owner: PortProcess, targetID: PortTargetID) -> Bool {
+        guard row.isRemote,
+              case let .remote(rowTargetID, rowPID) = row.origin,
+              rowTargetID == targetID else { return false }
+        switch owner.controlTarget {
+        case let .remoteProcess(ownerTargetID, ownerPID):
+            guard ownerTargetID == targetID, let ownerPID, ownerPID > 0,
+                  let rowPID, rowPID > 0, rowPID == ownerPID else { return false }
+            guard case let .remoteProcess(rowControlTargetID, rowControlPID) = row.controlTarget else { return false }
+            return rowControlTargetID == targetID && rowControlPID == ownerPID
+        case let .remoteDocker(ownerTargetID, ownerContainerID):
+            guard ownerTargetID == targetID,
+                  let ownerContainerID = DockerContainerID.validated(ownerContainerID),
+                  case let .dockerContainer(rowContainerIDRaw) = row.source else { return false }
+            guard let rowContainerIDRaw,
+                  let rowContainerID = DockerContainerID.validated(rowContainerIDRaw),
+                  rowContainerID == ownerContainerID else { return false }
+            guard case let .remoteDocker(rowControlTargetID, rowControlContainerIDRaw) = row.controlTarget,
+                  rowControlTargetID == targetID else { return false }
+            guard let rowControlContainerID = DockerContainerID.validated(rowControlContainerIDRaw) else { return false }
+            return rowControlContainerID == ownerContainerID
+        default:
+            return false
+        }
+    }
+
+    /// The initiating row is compared completely so a replacement owner cannot
+    /// inherit Force Kill. Sibling rows are allowed to differ in socket and
+    /// endpoint details when they share the same unambiguous control owner.
     private func equivalentRemoteTerminationIdentity(_ lhs: PortProcess, _ rhs: PortProcess) -> Bool {
         lhs.isRemote && rhs.isRemote && lhs.origin == rhs.origin
             && lhs.localPorts == rhs.localPorts && lhs.transports == rhs.transports
             && lhs.processName == rhs.processName && lhs.endpoints == rhs.endpoints
             && lhs.activityKind == rhs.activityKind
             && lhs.remoteSocketIdentity == rhs.remoteSocketIdentity
+            && lhs.source == rhs.source && lhs.controlTarget == rhs.controlTarget
+            && lhs.isDockerPublished == rhs.isDockerPublished
     }
 }

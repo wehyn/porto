@@ -31,12 +31,14 @@ actor RemoteProcessTerminator: ProcessTerminating {
         case .exited: return .exited
         case .failed(let failure): return .failed(failure)
         case .matched: break
+        case .cancelled: return .cancelled
         }
         guard !Task.isCancelled else { return .cancelled }
-        switch await signal(.term, pid: row.pid!) {
+        switch await signal(.term, row: row) {
         case .exited: return .exited
         case .failed(let failure): return .failed(failure)
         case .sent: break
+        case .cancelled: return .cancelled
         }
         return await waitAfterTerm(row: row)
     }
@@ -49,33 +51,44 @@ actor RemoteProcessTerminator: ProcessTerminating {
         case .exited: return .exited
         case .failed(let failure): return .failed(failure)
         case .matched: break
+        case .cancelled: return .cancelled
         }
         guard !Task.isCancelled else { return .cancelled }
-        switch await signal(.kill, pid: row.pid!) {
+        switch await signal(.kill, row: row) {
         case .exited: return .exited
         case .failed(let failure): return .failed(failure)
         case .sent: break
+        case .cancelled: return .cancelled
         }
         return await waitForExit(row: row, checks: 20, forceKill: true)
     }
 
-    private enum Revalidation { case matched, exited, failed(TerminationFailure) }
-    private enum SignalResult { case sent, exited, failed(TerminationFailure) }
+    private enum Revalidation { case matched, exited, failed(TerminationFailure), cancelled }
+    private enum SignalResult { case sent, exited, failed(TerminationFailure), cancelled }
 
     private var targetID: PortTargetID { PortTargetID(rawValue: "remote:\(profile.id.uuidString)") }
 
     private func validRemoteRow(_ row: PortProcess) -> Bool {
-        guard row.pid ?? 0 > 0 else { return false }
-        // Owner-backed rows without ss -e identity are intentionally
-        // non-destructive: PID and name can both be reused.
-        guard let socketIdentity = row.remoteSocketIdentity, !socketIdentity.isEmpty else { return false }
-        guard case let .remote(targetID, pid) = row.origin,
-              targetID == self.targetID, pid == row.pid else { return false }
-        return true
+        guard case let .remote(originTargetID, originPID) = row.origin,
+              originTargetID == targetID else { return false }
+        switch row.controlTarget {
+        case let .remoteProcess(controlTargetID, controlPID):
+            guard controlTargetID == targetID, row.source == .remoteProcess,
+                  let pid = row.pid, pid > 0, originPID == pid, controlPID == pid else { return false }
+            return row.remoteSocketIdentity?.isEmpty == false
+        case let .remoteDocker(controlTargetID, containerID):
+            guard controlTargetID == targetID, row.isDockerPublished,
+                  case let .dockerContainer(sourceID) = row.source,
+                  sourceID == containerID,
+                  DockerContainerID.validated(containerID) != nil else { return false }
+            return true
+        default:
+            return false
+        }
     }
 
     private func revalidate(_ row: PortProcess) async -> Revalidation {
-        guard !Task.isCancelled else { return .failed(.revalidationFailed) }
+        guard !Task.isCancelled else { return .cancelled }
         generation &+= 1
         let request = PortScanRequest(targetID: targetID, sessionGeneration: generation,
                                       scanGeneration: generation, trigger: .manual)
@@ -84,38 +97,99 @@ actor RemoteProcessTerminator: ProcessTerminating {
         }, onCancel: {
             Task { await runner.cancelActive() }
         })
-        guard !Task.isCancelled else { return .failed(.revalidationFailed) }
+        guard !Task.isCancelled else { return .cancelled }
         switch outcome {
-        case .cancelled: return .failed(.revalidationFailed)
+        case .cancelled: return .cancelled
         case .failure(_, _, let error, _):
             if case let .remote(remoteFailure) = error { return .failed(map(remoteFailure)) }
             return .failed(.revalidationFailed)
         case .success(let targeted):
-            guard let current = targeted.snapshot.allRows.first(where: { $0.id == row.id }) else {
+            let revalidationSnapshot = targeted.revalidationSnapshot ?? targeted.snapshot
+            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+                if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
+                    return .failed(.revalidationFailed)
+                }
                 return .failed(.staleTarget)
             }
             return equivalent(current, row) ? .matched : .failed(.staleTarget)
         }
     }
 
+    private func dockerHostEvidenceIsPresent(for row: PortProcess, in snapshot: PortSnapshot) -> Bool {
+        let originalSocketIdentities = Set((row.remoteSocketIdentity ?? "").split(separator: ",").map(String.init))
+        return snapshot.listeners.contains { candidate in
+            guard candidate.activityKind == .listener,
+                  candidate.localPorts.contains(where: row.localPorts.contains),
+                  candidate.transports.contains(where: row.transports.contains) else {
+                return false
+            }
+
+            let candidateSocketIdentities = Set((candidate.remoteSocketIdentity ?? "").split(separator: ",").map(String.init))
+            if !originalSocketIdentities.isEmpty {
+                if !candidateSocketIdentities.isEmpty {
+                    return !candidateSocketIdentities.isDisjoint(with: originalSocketIdentities)
+                }
+                return !Set(candidate.endpoints).isDisjoint(with: Set(row.endpoints))
+            }
+            return !Set(candidate.endpoints).isDisjoint(with: Set(row.endpoints))
+        }
+    }
+
     private func equivalent(_ lhs: PortProcess, _ rhs: PortProcess) -> Bool {
-        lhs.id == rhs.id && lhs.pid == rhs.pid && lhs.processName == rhs.processName
-            && lhs.activityKind == rhs.activityKind && lhs.transports == rhs.transports
-            && lhs.localPorts == rhs.localPorts && lhs.endpoints == rhs.endpoints
+        guard lhs.id == rhs.id, lhs.processName == rhs.processName,
+              lhs.activityKind == rhs.activityKind, lhs.transports == rhs.transports,
+              lhs.localPorts == rhs.localPorts, lhs.source == rhs.source,
+              lhs.controlTarget == rhs.controlTarget,
+              lhs.isDockerPublished == rhs.isDockerPublished else { return false }
+
+        if case .remoteDocker = rhs.controlTarget {
+            // A container is the control target; host PIDs and socket cookies
+            // may change while its validated ID and published port set stay
+            // the same.
+            return true
+        }
+        return lhs.pid == rhs.pid && lhs.endpoints == rhs.endpoints
             && lhs.remoteSocketIdentity == rhs.remoteSocketIdentity
     }
 
-    private func signal(_ signal: RemoteSSHSignal, pid: Int32) async -> SignalResult {
+    private func signal(_ signal: RemoteSSHSignal, row: PortProcess) async -> SignalResult {
+        let operation: RemoteSSHOperation
+        switch row.controlTarget {
+        case let .remoteProcess(_, pid):
+            guard let pid, pid > 0 else { return .failed(.staleTarget) }
+            operation = .signal(signal, pid: pid)
+        case let .remoteDocker(_, containerID):
+            guard DockerContainerID.validated(containerID) != nil else { return .failed(.staleTarget) }
+            operation = .signalContainer(signal, containerID: containerID)
+        default:
+            return .failed(.staleTarget)
+        }
         let result = await withTaskCancellationHandler(operation: {
-            await runner.run(profile: profile, operation: .signal(signal, pid: pid))
+            await runner.run(profile: profile, operation: operation)
         }, onCancel: {
             Task { await runner.cancelActive() }
         })
-        if result.failure == .cancelled { return .failed(.revalidationFailed) }
-        if Task.isCancelled { return .failed(.revalidationFailed) }
+        if result.failure == .cancelled || Task.isCancelled { return .cancelled }
         if let failure = result.failure { return .failed(map(failure)) }
         guard result.terminationStatus == 0 else {
             let stderr = String(decoding: result.stderr, as: UTF8.self).lowercased()
+            if stderr.contains("permission denied (publickey)")
+                || stderr.contains("authentication failed")
+                || stderr.contains("host key verification failed") {
+                return .failed(.sshAccessFailed)
+            }
+            if row.isDockerContainer {
+                if stderr.contains("permission denied") || stderr.contains("operation not permitted") {
+                    return .failed(.dockerPermissionDenied)
+                }
+                if result.terminationStatus == 127
+                    || (stderr.contains("docker") && stderr.contains("not found"))
+                    || stderr.contains("cannot connect")
+                    || stderr.contains("docker daemon")
+                    || stderr.contains("is the docker daemon running") {
+                    return .failed(.dockerUnavailable)
+                }
+            }
             if stderr.contains("permission denied") || stderr.contains("operation not permitted") {
                 return .failed(.permissionDenied)
             }
@@ -140,6 +214,7 @@ actor RemoteProcessTerminator: ProcessTerminating {
             guard !Task.isCancelled else { return .cancelled }
             switch await snapshotContains(row, before: deadline) {
             case .exited: return .exited
+            case .forceKillAvailable: return .forceKillAvailable
             case .failed: return .failed(.revalidationFailed)
             case .present: continue
             case .timedOut: break
@@ -150,7 +225,7 @@ actor RemoteProcessTerminator: ProcessTerminating {
         return forceKill ? .failed(.stillAlive) : .forceKillAvailable
     }
 
-    private enum Presence { case present, exited, failed, timedOut, cancelled }
+    private enum Presence { case present, exited, forceKillAvailable, failed, timedOut, cancelled }
     private func snapshotContains(_ row: PortProcess, before deadline: ContinuousClock.Instant) async -> Presence {
         let remaining = deadline - now()
         guard remaining > .zero else { return .timedOut }
@@ -183,18 +258,28 @@ actor RemoteProcessTerminator: ProcessTerminating {
         })
         switch outcome {
         case .success(let snapshot):
-            guard let current = snapshot.snapshot.allRows.first(where: { $0.id == row.id }) else { return .exited }
+            let revalidationSnapshot = snapshot.revalidationSnapshot ?? snapshot.snapshot
+            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+                if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
+                    return .forceKillAvailable
+                }
+                return .exited
+            }
             return equivalent(current, row) ? .present : .failed
         case .failure: return .failed
-        case .cancelled: return .failed
+        case .cancelled: return .cancelled
         }
     }
 
     private func map(_ failure: SSHCommandRunnerFailure) -> TerminationFailure {
-        failure == .cancelled ? .revalidationFailed : .revalidationFailed
+        _ = failure
+        return .sshAccessFailed
     }
 
     private func map(_ failure: RemoteScanFailure) -> TerminationFailure {
-        failure == .cancelled ? .revalidationFailed : .revalidationFailed
+        // Keep SSH host, transport, and output details out of the user-facing
+        // termination error surface while identifying the remote boundary.
+        _ = failure
+        return .sshAccessFailed
     }
 }

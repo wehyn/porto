@@ -35,6 +35,25 @@ final class PortVisibilityPolicyTests: XCTestCase {
         XCTAssertTrue(policy.includes(parsedGroup(port: 8080, processName: "my-remote-app")))
     }
 
+    func testRemoteDockerRowsBypassPortAndProcessNoiseFilters() {
+        let targetID = PortTargetID(rawValue: "remote:test")
+        let containerID = "0123456789ab"
+        let row = PortProcess(
+            id: "docker-row",
+            origin: .remote(targetID: targetID, pid: nil),
+            localPort: 443,
+            transport: .tcp,
+            processName: "Unknown process",
+            endpoints: [],
+            activityKind: .listener,
+            source: .dockerContainer(containerID: containerID),
+            controlTarget: .remoteDocker(targetID: targetID, containerID: containerID),
+            isDockerPublished: true
+        )
+
+        XCTAssertTrue(PortVisibilityPolicy.remoteFocused.includes(row))
+    }
+
     private func parsedGroup(port: Int, processName: String) -> ParsedPortGroup {
         ParsedPortGroup(
             key: PreliminaryGroupKey(
@@ -652,7 +671,7 @@ final class PortMonitorTests: XCTestCase {
         XCTAssertNil(monitor.terminationState(for: sameProcessRows[1]))
     }
 
-    func testClosingPopoverDoesNotAbandonUserRequestedTermination() async {
+    func testClosingPopoverCancelsUserRequestedTermination() async {
         let row = makeRow(pid: 42, port: 8080, name: "server")
         let scanner = SequencedMonitorScanner(outcomes: [
             .success(
@@ -670,9 +689,9 @@ final class PortMonitorTests: XCTestCase {
 
         monitor.setPresented(false)
         await terminator.release()
-        await waitUntil { monitor.terminationState(for: row) == .forceKillAvailable }
+        try? await Task.sleep(for: .milliseconds(30))
 
-        XCTAssertEqual(monitor.terminationState(for: row), .forceKillAvailable)
+        XCTAssertNil(monitor.terminationState(for: row))
         XCTAssertFalse(monitor.isPopoverPresented)
     }
 

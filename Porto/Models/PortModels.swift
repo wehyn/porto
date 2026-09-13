@@ -79,6 +79,35 @@ enum PortProcessOrigin: Hashable, Sendable, Codable {
     case remote(targetID: PortTargetID, pid: Int32?)
 }
 
+enum PortProcessSource: Hashable, Sendable, Codable {
+    case localApplication
+    case dockerHostProcess
+    case remoteProcess
+    case dockerContainer(containerID: String?)
+    case unknown
+}
+
+enum PortControlTarget: Hashable, Sendable, Codable {
+    case none
+    case local(ProcessIdentity)
+    case remoteProcess(targetID: PortTargetID, pid: Int32?)
+    case remoteDocker(targetID: PortTargetID, containerID: String)
+}
+
+enum DockerContainerID {
+    static let minimumLength = 12
+    static let maximumLength = 64
+
+    static func validated(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (minimumLength...maximumLength).contains(trimmed.count),
+              trimmed.unicodeScalars.allSatisfy({
+                  (48...57).contains($0.value) || (97...102).contains($0.value)
+              }) else { return nil }
+        return trimmed
+    }
+}
+
 struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let id: String
     let origin: PortProcessOrigin
@@ -92,6 +121,9 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let activityKind: PortActivityKind
     /// Stable per-socket identity from remote Linux `ss -e` output, when available.
     let remoteSocketIdentity: String?
+    let source: PortProcessSource
+    let controlTarget: PortControlTarget
+    let isDockerPublished: Bool
 
     init(
         id: String,
@@ -101,7 +133,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         processName: String,
         endpoints: [Endpoint],
         activityKind: PortActivityKind,
-        remoteSocketIdentity: String? = nil
+        remoteSocketIdentity: String? = nil,
+        source: PortProcessSource? = nil,
+        controlTarget: PortControlTarget? = nil,
+        isDockerPublished: Bool = false
     ) {
         self.init(
             id: id,
@@ -111,7 +146,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
             processName: processName,
             endpoints: endpoints,
             activityKind: activityKind,
-            remoteSocketIdentity: remoteSocketIdentity
+            remoteSocketIdentity: remoteSocketIdentity,
+            source: source,
+            controlTarget: controlTarget,
+            isDockerPublished: isDockerPublished
         )
     }
 
@@ -123,7 +161,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         processName: String,
         endpoints: [Endpoint],
         activityKind: PortActivityKind,
-        remoteSocketIdentity: String? = nil
+        remoteSocketIdentity: String? = nil,
+        source: PortProcessSource? = nil,
+        controlTarget: PortControlTarget? = nil,
+        isDockerPublished: Bool = false
     ) {
         self.id = id
         self.origin = origin
@@ -140,6 +181,9 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         self.endpoints = endpoints
         self.activityKind = activityKind
         self.remoteSocketIdentity = remoteSocketIdentity
+        self.source = source ?? Self.defaultSource(for: origin)
+        self.controlTarget = controlTarget ?? Self.defaultControlTarget(for: origin)
+        self.isDockerPublished = isDockerPublished
     }
 
     init(
@@ -150,7 +194,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         processName: String,
         endpoints: [Endpoint],
         activityKind: PortActivityKind,
-        remoteSocketIdentity: String? = nil
+        remoteSocketIdentity: String? = nil,
+        source: PortProcessSource? = nil,
+        controlTarget: PortControlTarget? = nil,
+        isDockerPublished: Bool = false
     ) {
         self.init(
             id: id,
@@ -160,7 +207,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
             processName: processName,
             endpoints: endpoints,
             activityKind: activityKind,
-            remoteSocketIdentity: remoteSocketIdentity
+            remoteSocketIdentity: remoteSocketIdentity,
+            source: source,
+            controlTarget: controlTarget,
+            isDockerPublished: isDockerPublished
         )
     }
 
@@ -172,7 +222,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         processName: String,
         endpoints: [Endpoint],
         activityKind: PortActivityKind,
-        remoteSocketIdentity: String? = nil
+        remoteSocketIdentity: String? = nil,
+        source: PortProcessSource? = nil,
+        controlTarget: PortControlTarget? = nil,
+        isDockerPublished: Bool = false
     ) {
         let uniqueLocalPorts = Set(localPorts).sorted()
         precondition(!uniqueLocalPorts.isEmpty, "PortProcess requires at least one local port")
@@ -192,6 +245,9 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         self.endpoints = endpoints
         self.activityKind = activityKind
         self.remoteSocketIdentity = remoteSocketIdentity
+        self.source = source ?? Self.defaultSource(for: origin)
+        self.controlTarget = controlTarget ?? Self.defaultControlTarget(for: origin)
+        self.isDockerPublished = isDockerPublished
     }
 
     init(
@@ -235,15 +291,54 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     }
 
     var isActionable: Bool {
-        if isRemote {
-            return (pid ?? 0) > 0 && remoteSocketIdentity?.isEmpty == false
+        switch controlTarget {
+        case .none:
+            return false
+        case .local:
+            return localIdentity != nil
+        case let .remoteProcess(_, pid):
+            return source == .remoteProcess
+                && (pid ?? 0) > 0
+                && remoteSocketIdentity?.isEmpty == false
+        case let .remoteDocker(_, containerID):
+            guard isDockerPublished,
+                  case let .dockerContainer(sourceID) = source,
+                  sourceID == containerID else { return false }
+            return DockerContainerID.validated(containerID) != nil
         }
-        return localIdentity != nil
     }
 
     var isRemote: Bool {
         if case .remote = origin { return true }
         return false
+    }
+
+    var isDockerContainer: Bool {
+        if case .dockerContainer = source { return true }
+        return false
+    }
+
+    var stableSortName: String {
+        // Keep the historical Docker-prefixed sort key so changing the
+        // presentation label does not reshuffle rows relative to non-Docker
+        // processes. The row ID remains the final deterministic tie-breaker.
+        isDockerPublished ? "Docker · \(processName)" : processName
+    }
+
+    private static func defaultSource(for origin: PortProcessOrigin) -> PortProcessSource {
+        switch origin {
+        case .local: return .localApplication
+        case .localUnverified: return .unknown
+        case .remote: return .remoteProcess
+        }
+    }
+
+    private static func defaultControlTarget(for origin: PortProcessOrigin) -> PortControlTarget {
+        switch origin {
+        case let .local(identity): return .local(identity)
+        case .localUnverified: return .none
+        case let .remote(targetID, pid): return .remoteProcess(targetID: targetID, pid: pid)
+        }
     }
 
     static func makeID(
@@ -350,20 +445,29 @@ enum ScanOutcome: Sendable {
 enum TerminationFailure: Error, Equatable, Sendable {
     case staleTarget
     case revalidationFailed
+    case sshAccessFailed
     case permissionDenied
+    case dockerUnavailable
+    case dockerPermissionDenied
     case stillAlive
     case system(code: Int32, description: String)
 
     var userMessage: String {
         switch self {
         case .staleTarget:
-            return "The process changed before it could be stopped."
+            return "The process or container changed before it could be stopped."
         case .revalidationFailed:
-            return "Porto could not verify the process before stopping it."
+            return "Porto could not verify the process or container before stopping it."
+        case .sshAccessFailed:
+            return "Porto could not revalidate the remote target over SSH."
         case .permissionDenied:
             return "Porto does not have permission to stop this process."
+        case .dockerUnavailable:
+            return "Docker control is unavailable on the remote host."
+        case .dockerPermissionDenied:
+            return "Porto does not have permission to control Docker on the remote host."
         case .stillAlive:
-            return "The process is still running."
+            return "The process or container is still running."
         case .system:
             return "The process could not be stopped."
         }
@@ -372,13 +476,19 @@ enum TerminationFailure: Error, Equatable, Sendable {
     var helpText: String {
         switch self {
         case .staleTarget:
-            return "The process or selected port changed, so Porto sent no signal. Refresh and try again."
+            return "The process, container, or selected port changed, so Porto sent no signal. Refresh and try again."
         case .revalidationFailed:
-            return "Porto could not revalidate the process and sent no signal. Refresh and try again."
+            return "Porto could not revalidate the process or container and sent no signal. Refresh and try again."
+        case .sshAccessFailed:
+            return "The SSH connection or remote port inspection failed, so Porto sent no signal. Check the profile and refresh."
         case .permissionDenied:
             return "The process denied the signal. Porto does not use elevated helpers in v1."
+        case .dockerUnavailable:
+            return "The Docker CLI or daemon was unavailable for this remote account. Porto does not install or start Docker for you."
+        case .dockerPermissionDenied:
+            return "The SSH account cannot access the Docker CLI or daemon. Porto does not use sudo or elevated helpers in v1."
         case .stillAlive:
-            return "The process remained alive after the requested force kill."
+            return "The process or container remained alive after the requested force kill."
         case let .system(_, description):
             return description
         }
@@ -402,7 +512,7 @@ struct PortProcessSort {
     static func sort(_ rows: [PortProcess]) -> [PortProcess] {
         rows.sorted { lhs, rhs in
             if lhs.localPort != rhs.localPort { return lhs.localPort < rhs.localPort }
-            let nameOrder = lhs.processName.localizedCaseInsensitiveCompare(rhs.processName)
+            let nameOrder = lhs.stableSortName.localizedCaseInsensitiveCompare(rhs.stableSortName)
             if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
             if lhs.transport.sortOrder != rhs.transport.sortOrder {
                 return lhs.transport.sortOrder < rhs.transport.sortOrder

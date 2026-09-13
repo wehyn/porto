@@ -174,10 +174,15 @@ struct DockerPortCatalog: Equatable, Sendable {
             origin: row.origin,
             localPorts: row.localPorts,
             transports: row.transports,
-            processName: "Docker · " + annotation.containerNames.joined(separator: ", "),
+            processName: annotation.containerNames.joined(separator: ", "),
             endpoints: row.endpoints,
             activityKind: row.activityKind,
-            remoteSocketIdentity: row.remoteSocketIdentity
+            remoteSocketIdentity: row.remoteSocketIdentity,
+            source: .dockerContainer(containerID: annotation.isUnambiguous ? annotation.containerIDs[0] : nil),
+            controlTarget: annotation.isUnambiguous
+                ? .remoteDocker(targetID: Self.remoteTargetID(from: row.origin)!, containerID: annotation.containerIDs[0])
+                : PortControlTarget.none,
+            isDockerPublished: true
         )
     }
 
@@ -248,10 +253,13 @@ struct DockerPortCatalog: Equatable, Sendable {
                 if lhs.sortOrder != rhs.sortOrder { return lhs.sortOrder < rhs.sortOrder }
                 return lhs.rawValue < rhs.rawValue
             },
-            processName: "Docker · " + accumulator.containerNames.sorted().joined(separator: ", "),
+            processName: accumulator.containerNames.sorted().joined(separator: ", "),
             endpoints: accumulator.endpoints.sorted(by: dockerEndpointSort),
             activityKind: key.activityKind,
-            remoteSocketIdentity: socketIdentity
+            remoteSocketIdentity: socketIdentity,
+            source: .dockerContainer(containerID: key.containerID),
+            controlTarget: .remoteDocker(targetID: key.targetID, containerID: key.containerID),
+            isDockerPublished: true
         )
     }
 
@@ -291,6 +299,10 @@ private struct DockerRowAnnotation {
     let containerIDs: [String]
     let containerNames: [String]
     let hasMissingContainerID: Bool
+
+    var isUnambiguous: Bool {
+        !hasMissingContainerID && containerIDs.count == 1
+    }
 }
 
 private struct DockerRowKey: Hashable {
@@ -390,7 +402,7 @@ struct DockerPortParser: Sendable {
               !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
             return nil
         }
-        return trimmed
+        return DockerContainerID.validated(trimmed)
     }
 
     private func parsePortRange(_ text: String) -> ClosedRange<Int>? {

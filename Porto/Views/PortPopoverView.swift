@@ -14,7 +14,7 @@ struct PortPopoverView: View {
             targetSelector
             Divider().opacity(0.65)
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     activitySummary
                     if monitor.isScanning && !monitor.hasSnapshot {
                         scanningState
@@ -26,7 +26,7 @@ struct PortPopoverView: View {
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .padding(.vertical, 14)
             }
             .scrollIndicators(.automatic)
             footer
@@ -44,9 +44,9 @@ struct PortPopoverView: View {
         HStack(spacing: 10) {
             Text("Porto").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
             Spacer(minLength: 8)
-            Button(action: monitor.refresh) {
-                Image(systemName: "arrow.clockwise")
-                    .imageScale(.medium)
+                Button(action: monitor.refresh) {
+                    Image(systemName: "arrow.clockwise")
+                        .imageScale(.medium)
                     .rotationEffect(.degrees(monitor.isManualRefreshing && !reduceMotion ? 360 : 0))
                     .animation(
                         monitor.isManualRefreshing && !reduceMotion
@@ -54,7 +54,8 @@ struct PortPopoverView: View {
                         value: monitor.isManualRefreshing
                     )
             }
-            .buttonStyle(.borderless)
+                .buttonStyle(.borderless)
+                .frame(width: 44, height: 44)
             .accessibilityLabel("Refresh ports")
             .help("Refresh ports")
             .keyboardShortcut("r", modifiers: [.command])
@@ -75,8 +76,8 @@ struct PortPopoverView: View {
             .accessibilityLabel("Porto menu")
             .help("About Porto and Quit Porto")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
     }
 
     private func openSettings() {
@@ -86,7 +87,6 @@ struct PortPopoverView: View {
 
     private var targetSelector: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("WATCHING").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             Picker("Target", selection: targetBinding) {
                 ForEach(monitor.availableTargets, id: \.self) { target in
                     Text(target.displayName).tag(target)
@@ -96,10 +96,6 @@ struct PortPopoverView: View {
             .pickerStyle(.menu)
             .disabled(monitor.isTargetPickerDisabled)
             .accessibilityLabel("Port monitoring target")
-            Text(monitor.targetStatusText)
-                .font(.caption)
-                .foregroundStyle(monitor.remoteFailure == nil ? Color.secondary : Color.orange)
-                .fixedSize(horizontal: false, vertical: true)
             if monitor.profiles.isEmpty {
                 Text("Add a remote server profile in Settings to inspect another machine over SSH.")
                     .font(.caption2)
@@ -119,7 +115,11 @@ struct PortPopoverView: View {
     }
 
     private var activitySummary: some View {
-        Text("\(monitor.listenerRows.count) listening   \(monitor.connectionRows.count) connections")
+            Label {
+                Text("\(monitor.listenerRows.count) listening · \(monitor.connectionRows.count) connections")
+            } icon: {
+                Image(systemName: "dot.radiowaves.left.and.right")
+            }
             .font(.caption.weight(.medium))
             .foregroundStyle(.secondary)
             .accessibilityLabel("\(monitor.listenerRows.count) listening, \(monitor.connectionRows.count) connections")
@@ -128,7 +128,10 @@ struct PortPopoverView: View {
     @ViewBuilder
     private var listenerRows: some View {
         if monitor.listenerRows.isEmpty && monitor.connectionRows.isEmpty {
-            Text("No ports found").font(.callout).foregroundStyle(.secondary).padding(.vertical, 4)
+            Text("No ports found")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 8)
         } else {
             LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(monitor.listenerRows) { row in PortProcessRow(row: row, monitor: monitor) }
@@ -145,20 +148,19 @@ struct PortPopoverView: View {
                 }
                 .padding(.top, 4)
             } label: {
-                Text("Connections (\(monitor.connectionRows.count))").font(.callout.weight(.medium))
+                Label("Connections (\(monitor.connectionRows.count))", systemImage: "link")
+                    .font(.callout.weight(.medium))
             }
             .accessibilityLabel("Connections, \(monitor.connectionRows.count), collapsed by default")
         }
     }
 
     private var scanningState: some View {
-        HStack(spacing: 7) {
-            ProgressView().controlSize(.small)
-            Text(monitor.isRemoteTarget ? "Connecting over SSH…" : "Scanning…").foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 5)
-        .accessibilityElement(children: .combine)
+        ProgressView()
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 5)
+            .accessibilityLabel("Scanning ports")
     }
 
     private var firstLoadErrorState: some View {
@@ -179,7 +181,7 @@ struct PortPopoverView: View {
         if let error = monitor.scanError, monitor.hasSnapshot {
             errorFooter(error.userMessage)
         } else if let error = monitor.remoteFailure, monitor.hasSnapshot {
-            errorFooter(error.userMessage + " Showing last results.")
+            errorFooter(error.userMessage)
         }
     }
 
@@ -189,7 +191,10 @@ struct PortPopoverView: View {
             Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             Spacer(minLength: 4)
             Button(action: monitor.retry) { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(.borderless).accessibilityLabel("Retry port scan").help("Retry port scan")
+                .buttonStyle(.borderless)
+                .frame(width: 44, height: 44)
+                .accessibilityLabel("Retry port scan")
+                .help("Retry port scan")
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 9)
@@ -202,6 +207,9 @@ struct PortPopoverView: View {
 
     private var forceKillMessage: String {
         guard let row = monitor.forceKillPrompt else { return "" }
+        if row.isDockerContainer {
+            return "Force killing container \(row.processName) prevents cleanup and can lose unsaved work."
+        }
         return "Force killing \(row.processName) (PID \(row.pid ?? 0)) prevents cleanup and can lose unsaved work."
     }
 
