@@ -12,6 +12,7 @@ struct RemoteServerSettingsView: View {
     @State private var testingProfileID: UUID?
     @State private var capabilityMessages: [UUID: String] = [:]
     @State private var profileTestTask: Task<Void, Never>?
+    @State private var profileTestToken: UUID?
 
     init(monitor: PortMonitor, discovery: any SSHHostCandidateDiscovering = LocalSSHHostCandidateDiscovery()) {
         self.monitor = monitor
@@ -66,6 +67,8 @@ struct RemoteServerSettingsView: View {
         .onDisappear {
             profileTestTask?.cancel()
             profileTestTask = nil
+            profileTestToken = nil
+            testingProfileID = nil
         }
         .sheet(isPresented: $showingPicker, onDismiss: openManualEditorIfRequested) {
             SSHConnectionPicker(monitor: monitor, discovery: discovery) {
@@ -179,11 +182,14 @@ struct RemoteServerSettingsView: View {
         capabilityMessages[profile.id] = nil
         testingProfileID = profile.id
         profileTestTask?.cancel()
+        let testToken = UUID()
+        profileTestToken = testToken
         profileTestTask = Task { @MainActor in
             let result = await monitor.testConnection(for: profile)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, profileTestToken == testToken else { return }
             testingProfileID = nil
             profileTestTask = nil
+            profileTestToken = nil
             switch result {
             case .success:
                 capabilityMessages[profile.id] = "Connection verified · port inspection available"
@@ -388,6 +394,7 @@ private struct RemoteServerProfileEditor: View {
     @State private var testMessage: String?
     @State private var isTesting = false
     @State private var testTask: Task<Void, Never>?
+    @State private var testToken: UUID?
     @State private var hostnameEntry: String
 
     init(monitor: PortMonitor, profile: RemoteServerProfile, onDone: @escaping () -> Void) {
@@ -420,7 +427,7 @@ private struct RemoteServerProfileEditor: View {
                     }
                 }
                 Button("Test Connection") { testConnection() }
-                    .disabled(!draft.isEnabled || isTesting)
+                    .disabled(isTesting)
             }
             .disabled(isTesting)
             if let validationMessage {
@@ -456,6 +463,8 @@ private struct RemoteServerProfileEditor: View {
         }
         .onDisappear {
             cancelTest()
+            testToken = nil
+            isTesting = false
             testMessage = nil
         }
     }
@@ -483,11 +492,14 @@ private struct RemoteServerProfileEditor: View {
         validationMessage = nil
         testMessage = nil
         isTesting = true
+        let token = UUID()
+        testToken = token
         testTask = Task { @MainActor in
-            let result = await monitor.testConnection(for: profile)
-            guard !Task.isCancelled else { return }
+            let result = await monitor.testDraftConnection(for: profile)
+            guard !Task.isCancelled, testToken == token else { return }
             isTesting = false
             testTask = nil
+            testToken = nil
             switch result {
             case .success: testMessage = "Connection verified · port inspection available"
             case .refusedDisabled: testMessage = "Enable this profile to test its connection."
