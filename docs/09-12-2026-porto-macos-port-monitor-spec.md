@@ -11,8 +11,9 @@
 Porto is a lightweight, menu-bar-only macOS utility for developers who need to
 see which local processes are listening on ports or holding active Internet
 connections and, when necessary, stop one of those processes. It can also
-inspect one selected Linux host over SSH; that remote view is read-only and
-never participates in process termination.
+inspect one selected Linux host over SSH. Eligible remote process and Docker
+rows can also be controlled through the bounded, identity-safe remote workflow
+defined below.
 
 This specification defines the v1 product behavior, architecture, data contract, process-safety rules, error handling, performance limits, test coverage, and release acceptance criteria. **Must** is release-blocking, **should** requires a documented reason to omit, and **may** is optional.
 
@@ -21,10 +22,10 @@ This specification defines the v1 product behavior, architecture, data contract,
 ### 2.1 Goals
 
 - Show useful local port activity within one click of the menu-bar icon.
-- Show listeners and active connections together in one focused view without category controls.
+- Show listeners by default and keep active connections in a collapsed section within one focused view.
 - Refresh while the user is viewing the list without continuously polling in the background.
 - Let the user request a graceful process stop and deliberately escalate to force kill only when necessary.
-- Let the user select one literal SSH alias and inspect Linux TCP/UDP activity without remote controls.
+- Let the user select one literal SSH alias and inspect Linux TCP/UDP activity, with safe remote controls where the configured account has the required capability.
 - Remain responsive and low-overhead on a busy development machine.
 - Protect against stale rows and PID reuse before every signal.
 
@@ -33,8 +34,8 @@ This specification defines the v1 product behavior, architecture, data contract,
 V1 is acceptable only when all of the following are true:
 
 - Opening Porto immediately starts a scan and presents current rows, a first-load state, or an actionable scan error.
-- All visible listener and connection rows appear in one unified list with no category disclosure controls.
-- This Mac remains the default target; a selected remote target hides configured common host-service ports, retains other valid rows, and marks visible rows read-only.
+- All visible listener rows appear in the primary list, with active connections available in a collapsed-by-default section.
+- This Mac remains the default target; a selected remote target hides configured common host-service ports, retains other valid rows, and marks eligible rows actionable or unavailable according to validated control identity and permissions.
 - Results refresh every 2 seconds while the popover is open and do not refresh while it is closed.
 - There is never more than one Porto-owned local `lsof` or remote SSH scan child in flight.
 - Normal stop never sends SIGKILL. Force Kill is unavailable until SIGTERM has failed to end the revalidated process within the defined grace period.
@@ -62,12 +63,12 @@ V1 is acceptable only when all of the following are true:
 ### 3.2 Explicitly excluded from v1
 
 - A main application window, Dock icon, or application-switcher presence.
-- A settings window, launch-at-login support, notifications, global shortcuts, or persisted UI preferences.
-- Administrator authentication, privileged helpers, launch daemons, or elevated scans.
+- Launch-at-login support, notifications, global shortcuts, or persisted UI preferences. A native Settings window is included for configured remote server profiles.
+- Administrator authentication, privileged helpers, launch daemons, or elevated scans. Remote control uses only the configured account's existing permissions.
 - Port forwarding, firewall management, packet capture, bandwidth measurement, or historical activity.
 - Search, filtering, sorting controls, process icons, code-signing metadata lookup, or application bundle resolution.
 - Terminal launch, command copy, or IDE integration. The row/action design must leave room for these later.
-- Arbitrary hostname entry, multi-host dashboards, containers, virtual machines, and remote controls. Remote inspection is limited to one literal SSH alias at a time.
+- Arbitrary hostname entry, multi-host dashboards, unmanaged containers, and virtual machines. Remote inspection/control is limited to one literal SSH alias at a time; Docker container control is limited to validated published-container rows.
 - App Store, Developer ID distribution, notarization, auto-update, analytics, crash reporting, or telemetry. Public distribution requires a separate specification.
 
 ## 4. Definitions and classification
@@ -82,7 +83,7 @@ V1 is acceptable only when all of the following are true:
 - **Process identity:** PID plus process start time obtained from the macOS process API. PID or process name alone is unsafe.
 - **Visible:** The popover is actually presented, not merely that Porto is running or its menu-bar item exists.
 - **Target:** Either This Mac or one literal alias discovered from the user's `~/.ssh/config`.
-- **Remote row:** A socket parsed from the selected Linux host. Its Linux PID and process name are informational and it is never actionable.
+- **Remote row:** A socket parsed from the selected Linux host. Its Linux PID/process name and socket identity may support a remote process target; a Docker-published row may instead support a validated container target. Display names are never command targets.
 
 Sockets without a numeric local port, with unsupported protocols, or that cannot be classified must be skipped individually and counted for diagnostics. They must not invalidate otherwise usable rows.
 
@@ -105,19 +106,19 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 - The refresh button has accessibility label and help text `Refresh ports`. When the popover has keyboard focus, Command-R invokes the same coalesced refresh path.
 - The scrollable body contains one unified list of listener and connection rows.
 - The footer may contain compact error status without persistent verbose text.
-- The overflow menu contains `About Porto` and `Quit Porto`.
-- `About Porto` opens the standard macOS About panel. This is the only secondary panel allowed in v1.
+- The overflow menu contains `Settings…`, `About Porto`, and `Quit Porto`.
+- `Settings…` opens the native macOS Settings window for remote server profiles. `About Porto` opens the standard macOS About panel.
 
 ### 5.3 Unified activity list and empty state
 
-- Listeners and connections appear together in one list; no category labels or disclosure controls are shown.
+- Listeners appear first in one list, with active connections in a collapsed section by default.
 - Rows sort by the first local port ascending, process name case-insensitively, TCP before UDP, then PID ascending across both activity kinds.
 - An empty list says `No ports found`.
-- A first load with no snapshot shows one progress indicator and `Scanning…`, not false empty states.
+- A first load with no snapshot shows one progress indicator without a persistent status sentence, not a false empty state.
 
 ### 5.4 Rows and details
 
-- A row shows the process name with the local port, or an ordered host-port list, beneath it and an icon-only process action aligned with the name. Rows are not expandable and do not expose per-process disclosure controls.
+- A row shows the process or container display name with the local port, or an ordered host-port list, beneath it and an icon-only action aligned with the name when a validated control target exists. Rows are not expandable and do not expose per-process disclosure controls.
 - Ports use tabular digits. Long process names truncate without displacing the action.
 - Each row is keyboard-focusable. Protocol, PID, socket state, and endpoint data remain internal scan and revalidation data rather than standard row content.
 
@@ -134,7 +135,7 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 
 ### 5.6 Stop and force kill
 
-- Normal stop is an icon-only `×` with accessibility label `Stop <process name>` and help text `Send SIGTERM to process <name> (PID <pid>). This can close all ports owned by the process.`
+- Normal stop is an icon-only `×` with accessibility label `Stop <process name>` and help text that identifies the process or container and explains that SIGTERM can close all ports owned by it.
 - Clicking `×` sends no signal until revalidation succeeds. SIGTERM does not require confirmation in v1.
 - During revalidation and the bounded exit check, every row for the same process identity shows progress and disables duplicate stop actions.
 - Only one termination workflow may revalidate or signal at a time. While it is active, termination actions for other processes are disabled without hiding them.
@@ -148,11 +149,11 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 
 ### 5.7 Target selection and remote Linux view
 
-- The target selector is placed under `WATCHING` and contains `This Mac` plus literal Linux aliases read from the user's `~/.ssh/config`. The key-only `github.com` entry is omitted, while OrbStack's local-only `orb` alias remains available as a user-selectable proposal. OrbStack host-published listeners belong to the This Mac scan while OrbStack is running and are absent when it is stopped. Aliases are discovered from files only; picker population never launches SSH or executes configuration helpers.
+- The target selector contains `This Mac` plus literal Linux aliases read from the user's `~/.ssh/config`. It has no `WATCHING` eyebrow or persistent target-status copy. The key-only `github.com` entry is omitted, while OrbStack's local-only `orb` alias remains available as a user-selectable proposal. OrbStack host-published listeners belong to the This Mac scan while OrbStack is running and are absent when it is stopped. Aliases are discovered from files only; picker population never launches SSH or executes configuration helpers.
 - This Mac is selected by default. A target change invalidates the old scan session before cancellation, cancels the old remote work, and starts one scan for the new target only after the old runner has released its child.
-- Remote status uses `Connecting over SSH…`, `Available over SSH · updated just now · read-only`, `Refreshing… · read-only`, and `Reconnecting… · showing in-memory results`. It must not say `SSH connected` while idle because scans use short-lived SSH children.
-- Remote rows show a lock/read-only treatment and expose no stop or force-kill action. This guard exists in the view, monitor, model, and terminator layers.
-- Remote snapshots hide common host-service ports (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) and ownerless non-Docker rows after parsing while retaining custom project ports. Published Docker ports are exempt from the common-port filter and labeled `Docker · <container>` using optional `docker ps` metadata. For a Docker container with a usable ID, IPv4/IPv6, TCP/UDP, and all matching published host-port records for the same target and activity kind are coalesced into one logical row; the row retains each host port once in ascending order. Different containers remain separate even when their visible names match, and listener/connection kinds remain separate. Diagnostics continue to report all valid records received from `ss`.
+- While a scan is active, the target area shows only an accessible progress indicator. It does not show `Connecting over SSH…`, `Available over SSH`, `updated just now`, `Refreshing…`, `Reconnecting…`, or `showing in-memory results`; actionable failures remain available through the compact error state.
+- Eligible remote rows expose the same icon-only SIGTERM-first action as local rows. Rows without sufficient identity/capability remain visible with a lock and an explanation; this guard exists in the view, monitor, model, and terminator layers.
+- Remote snapshots hide common host-service ports (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) and ownerless non-Docker rows after parsing while retaining custom project ports. Every Docker row and every published Docker host port is exempt from the common-port filter. Docker names display without the generated `Docker ·` prefix, and display names are never control targets. For a Docker container with a usable ID, IPv4/IPv6, TCP/UDP, and all matching published host-port records for the same target and activity kind are coalesced into one logical row; the row retains each host port once in ascending order. Different containers remain separate even when their visible names match, and listener/connection kinds remain separate. Diagnostics continue to report all valid records received from `ss`.
 - One successful snapshot is retained in memory per target until quit. A failure keeps that target's rows and marks them stale; a first failure shows an actionable retry without a false empty success.
 - A listener is evidence on the selected server, not a claim about reachability from another network or the public Internet. Missing Linux process metadata does not hide an otherwise valid socket.
 
@@ -211,8 +212,11 @@ fallback and produces a non-actionable row. Remote rows are target-scoped and
 use the Linux PID plus normalized name, socket cookie, inode, or a canonical
 endpoint tuple. Docker rows with a usable container ID instead use the target,
 activity kind, and container ID; the changing port list is not part of that
-identity. A remote PID is never treated as a macOS `ProcessIdentity` and can
-never enable termination.
+identity. A remote PID is never treated as a macOS `ProcessIdentity`. It can
+enable remote process control only when paired with the target-scoped socket
+identity and passes full remote revalidation. A Docker row uses a validated
+container ID instead; its display name and any Docker host PID can never enable
+or target termination.
 
 The preliminary socket grouping key is:
 
@@ -226,7 +230,7 @@ Consequences:
 - Duplicate endpoint-and-state observations are removed. State remains attached to its endpoint so grouped sockets with different states are represented accurately.
 - Listener and connection records on the same local port remain separate.
 - TCP and UDP on the same local port remain separate for local and non-Docker remote rows; Docker rows with a usable container ID aggregate them, aggregate all matching host ports for that container, and retain ordered local-port and protocol lists for display, accessibility, and help text.
-- Docker rows without a usable container ID are labeled when metadata matches but are not coalesced.
+- Docker rows without a usable container ID remain visible at socket-level granularity, are labeled only when metadata supplies a truthful name, and are not actionable as container targets.
 - The same process and port can appear in both sections.
 - Termination state is keyed by `ProcessIdentity` because a signal affects the process, not one socket.
 
@@ -313,16 +317,24 @@ bounded at 16 MiB stdout and 256 KiB stderr, and has a five-second total
 deadline. Cancellation, timeout, read failure, or overflow terminates the
 local SSH child, waits up to 500 milliseconds, force-kills only that child if
 needed, and awaits cleanup. Remote command output is decoded and parsed without
-shell interpolation; raw output is never surfaced or persisted.
+shell interpolation; raw output is never surfaced or persisted. Remote signal
+operations use only runner-generated fixed commands: `/bin/kill -TERM/-KILL --
+<validated-pid>` for a validated normal-process target, or `docker kill --signal
+TERM/KILL -- <validated-container-id>` for a validated Docker target. Porto does
+not accept arbitrary remote shell text, PIDs, signal values, container names, or
+host PIDs from the UI.
 
 The parser supports numeric IPv4/IPv6, wildcard, loopback, and interface-
 qualified endpoints; TCP `LISTEN` and unconnected UDP are listeners, while
 remote-endpoint TCP/UDP rows are connections. Owner metadata is optional. A
 successful empty result is valid, and a successful remote row is always marked
-with its target origin and read-only state. The optional Docker section maps
+with its target origin and a control classification. The optional Docker section maps
 published host ports to running container IDs and names, and coalesces
-matching listener records into stable logical container rows with ordered
-host-port lists without changing socket diagnostics. The Docker query is
+matching records into stable logical container rows with ordered host-port
+lists without changing socket diagnostics. Every published Docker port remains
+visible, including common ports filtered for ordinary remote host services.
+Docker display names omit the generated `Docker ·` prefix and are never command
+targets. The Docker query is
 bounded and is skipped when
 `timeout` is unavailable; a Docker failure never replaces a successful `ss`
 result. Exit status 255 alone is a generic transport failure; bounded
@@ -337,7 +349,7 @@ timeout, or missing/incompatible `ss` failures.
 - `PortScanner` is an injected `Sendable` service or actor for subprocess execution and parsing away from the main actor.
 - `LsofRunner` is the single serialized owner of every normal and targeted `lsof` child.
 - `SSHHostCatalog` reads the user's SSH configuration files with bounded, deterministic include traversal.
-- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed, read-only Linux `ss` query plus optional `docker ps` publication metadata for the selected alias.
+- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed Linux `ss` query plus optional `docker ps` publication metadata and validated signal commands for the selected alias.
 - `ProcessInspector` reads immutable process identity and existence.
 - `ProcessTerminator` coordinates validation and signaling away from the main actor.
 - `MenuPresentationObserver` reports actual popover presentation.
@@ -354,7 +366,7 @@ idle -> scanning -> idle
 - At most one normal scan task exists, and at most one local `lsof` or remote SSH child belongs to Porto at a time.
 - A request during `scanning` sets one Boolean pending flag; later requests add nothing.
 - After completion, run one follow-up only if pending is true and the popover is still visible.
-- A stop action has priority over automatic refresh: it cancels or waits for the current normal child to exit, then starts targeted validation through the same `LsofRunner`. Timer/manual requests received meanwhile coalesce into one later normal refresh.
+- A stop action has priority over automatic refresh: it cancels or waits for the current normal child to exit, then starts targeted validation through the serialized runner for the selected target (`LsofRunner` locally or the SSH runner remotely). Timer/manual requests received meanwhile coalesce into one later normal refresh.
 - Canceling a normal scan to prioritize termination is an expected internal cancellation: it retains the current snapshot and shows no scan error.
 - Suspend normal scanning for the full active termination workflow, including the bounded exit check. Preserve at most one pending refresh and run it when the workflow returns to an idle or force-eligible state and the popover is visible.
 - Generation tokens or structured cancellation prevent an older visibility session from publishing into a newer one.
@@ -375,11 +387,15 @@ idle -> scanning -> idle
 
 ## 9. Process termination safety
 
-Termination is a This Mac capability only. `ProcessTerminator` accepts local
-socket validation and immutable macOS process identities; a remote-origin row
-is rejected before it can reach validation or a signal sender. Remote Linux
-PIDs, names, cookies, and endpoints are informational and Porto never sends a
-remote signal or invokes `sudo`, `doas`, `ss --kill`, or an installed helper.
+Termination is available on This Mac and, for eligible rows, on the selected
+remote Linux target. `ProcessTerminator` uses immutable macOS process identity
+and targeted socket validation locally. `RemoteProcessTerminator` uses the
+remote target identity plus socket identity for normal processes, or a
+validated container ID for Docker rows. Remote display names, Linux host PIDs
+for Docker-backed rows, and arbitrary user input are never command targets.
+Remote commands are sent only through the fixed, bounded SSH runner; Porto
+never invokes `sudo`, `doas`, `ss --kill`, installs a helper, or escalates
+privileges.
 
 ### 9.1 Revalidation before SIGTERM
 
@@ -398,9 +414,11 @@ It also uses the same 3-second timeout, concurrent pipe draining, output limits,
 
 ### 9.2 Graceful-exit check
 
-- After SIGTERM, poll identity every 100 milliseconds for at most 2 seconds using `ProcessInspector`; do not repeatedly launch `lsof`.
+- After local SIGTERM, poll identity every 100 milliseconds for at most 2 seconds using `ProcessInspector`; after remote SIGTERM, poll the selected remote snapshot workflow with the same 2-second bound. Do not repeatedly launch local `lsof` for the local check.
 - Exit means PID absence or a changed start time. PID reuse therefore means the original process exited.
-- App quit cancels the check. Popover close does not abandon user-requested termination; it may finish without UI animation and cannot start recurring background scans.
+- App quit and popover close cancel the check and its underlying remote/local
+  workflow. Close also clears termination UI state; no recurring scan or stale
+  result may start or publish after dismissal.
 - If the original identity survives 2 seconds, expose Force Kill.
 - Reaching the grace timeout ends the active termination workflow; force eligibility is durable row state, not a background task.
 
@@ -417,7 +435,30 @@ After explicit confirmation:
 
 Porto never automatically escalates a monitored process from SIGTERM to SIGKILL.
 
-### 9.4 Result handling
+### 9.4 Remote control validation and capability limits
+
+For a remote normal-process row, Porto requires the selected target, positive
+Linux PID, non-empty target-scoped socket identity, process source, process
+name, endpoints, activity kind, and transport/port set to match a fresh remote
+snapshot before sending a signal. A PID or name alone is insufficient. After
+SIGTERM, Porto polls the remote snapshot for up to 2 seconds; if the row still
+exists, it exposes the separate Force Kill action. Force Kill requires explicit
+confirmation and repeats the same fresh validation before sending SIGKILL.
+
+For a Docker-published row, Porto requires an unambiguous, validated
+container ID from Docker metadata and revalidates the complete row before
+using `docker kill --signal TERM` or, after confirmation, `docker kill --signal
+KILL`. It never substitutes the Docker host PID, container display name, or a
+truncated/unvalidated ID. A container-level action applies to the container's
+published ports as one ownership unit.
+
+The configured SSH account must be allowed to signal the remote process or
+access the Docker CLI/daemon. Root-owned or otherwise inaccessible processes,
+missing/incomplete `ss` ownership data, unavailable Docker, and permission
+failures remain visible but unavailable or report a bounded capability/error
+state. Porto does not add privileged helpers or claim control it cannot prove.
+
+### 9.5 Result handling
 
 - `ESRCH`: treat as already exited and successful.
 - `EPERM` or `EACCES`: report permission denied and keep the row.
@@ -585,7 +626,8 @@ Fixtures are sanitized and contain no user-specific public IPs or process data.
 - Remote target selection, fixed SSH argument contract, bounded output and
   timeout/cancellation cleanup, diagnostic classification, target-scoped IDs,
   ownerless sockets, per-target cache retention, stale-result suppression,
-  bounded failure backoff, and read-only termination guards.
+  bounded failure backoff, remote process/container termination guards, and
+  cancellation-safe signal workflows.
 
 ### 15.3 Termination tests
 
@@ -603,6 +645,12 @@ Injected inspector, validator, signal sender, and clock cover:
 - Self-PID action unavailable.
 - Popover closure during bounded exit check.
 - No repeated `lsof` during 100-millisecond identity polling.
+
+Remote termination tests additionally cover target/profile mismatch, missing
+socket identity, changed remote process/container identity, validated
+container-ID command construction, no Docker host-PID fallback, permission or
+Docker capability failure, SIGTERM before SIGKILL, explicit Force Kill
+confirmation, and cancellation while the popover closes.
 
 At least one integration test starts a disposable current-user TCP server, discovers it, uses the real service to send SIGTERM, and verifies exit and row removal. A separate disposable process that ignores SIGTERM verifies force-kill eligibility; SIGKILL occurs only after explicit test confirmation. Teardown always cleans up fixtures.
 
@@ -629,7 +677,8 @@ Run the generated Debug `.app` on macOS 26 and verify:
 - Usable behavior with hundreds of connection rows.
 - Disposable server graceful stop and explicit force-kill fixture behavior.
 - Permission failure keeps its row with accessible feedback.
-- About uses the standard panel; Quit ends tasks and child processes.
+- Settings opens the native remote-profile window; About uses the standard
+  panel; Quit ends tasks and child processes.
 
 ### 15.6 Remote runtime acceptance
 
@@ -637,12 +686,18 @@ When representative Linux hosts are available, verify a Debian/Ubuntu host,
 an independently packaged iproute2 host, and a non-root account with incomplete
 process visibility. Compare Porto's rows with the exact `ss -H -n -O -a -t -u
 -p -e` output, including TCP/UDP classification, IPv4/IPv6 endpoints, wildcard
-listeners, stable IDs, and retained ownerless sockets. Exercise authentication,
+listeners, stable IDs, and parser diagnostics for ownerless sockets (which may
+be hidden by the remote visibility policy). Exercise authentication,
 host-key, unreachable, timeout, and incompatible-`ss` failures; switch targets
 while SSH is delayed; confirm cancellation leaves no child or stale rows; and
 verify that no remote file, service, configuration change, privilege
-escalation, or signal is attempted. Treat ordinary SSH authentication and audit
-logging as expected user-owned side effects, not as Porto persistence.
+escalation, or unvalidated signal is attempted. For an eligible remote process,
+verify SIGTERM and the separate confirmed Force Kill path. For an eligible
+Docker row, verify container-level TERM/KILL using the validated ID and no
+host-PID fallback. Treat ordinary SSH authentication, audit logging, and
+authorized signal delivery as expected user-owned side effects, not as Porto
+persistence. Permission/capability limits must leave rows visible and explain
+why control is unavailable.
 
 On a Docker host with published ports, verify that repeated IPv4/IPv6 records
 for the same container appear once, that one container's ports 53 and 80 are
@@ -655,7 +710,7 @@ containers and listener/connection activity remain separate.
 | ID | Release requirement | Verification |
 | --- | --- | --- |
 | AC-01 | Menu-bar-only app with no main window or Dock presence | Built-app manual test |
-| AC-02 | Listeners and connections appear together in one unified list without category controls | UI and manual tests |
+| AC-02 | Listeners appear by default and connections remain collapsed until expanded | UI and manual tests |
 | AC-03 | TCP/UDP classification and grouping follow Sections 4 and 7 | Parser fixtures |
 | AC-04 | Immediate open scan and 2-second visible-only refresh | Clock test and runtime observation |
 | AC-05 | One total Porto-owned `lsof` or SSH child; one normal scan and one coalesced refresh maximum | Concurrency tests and Activity Monitor |
@@ -666,7 +721,7 @@ containers and listener/connection activity remain separate.
 | AC-10 | Closed state has no recurring scanner or child | Instruments and Activity Monitor |
 | AC-11 | Generate, test, build, and actual app launch all succeed | Clean-checkout release check |
 | AC-12 | No raw port/process data is persisted or emitted outside an explicit selected SSH scan | Code review and filesystem/network observation |
-| AC-13 | Remote aliases, fixed command, read-only rows, cache isolation, and bounded failures | Catalog/runner/parser/monitor tests and Linux acceptance |
+| AC-13 | Remote aliases, fixed command, target-scoped actionable/locked rows, cache isolation, bounded failures, and cancellable control | Catalog/runner/parser/monitor/termination tests and Linux acceptance |
 
 ## 17. Delivery sequence and definition of done
 

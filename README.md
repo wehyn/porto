@@ -3,8 +3,8 @@
 Porto is a macOS 26+ menu-bar utility for viewing TCP/UDP listeners and active
 connections on This Mac or one selected Linux host. It uses the installed
 `/usr/sbin/lsof` directly for local inspection and OpenSSH plus Linux `ss` for
-read-only remote inspection. Local process termination remains behind identity
-and socket revalidation; remote rows are always read-only.
+remote inspection. Local and eligible remote termination remains behind
+identity and socket/container revalidation.
 
 ## Requirements
 
@@ -49,24 +49,27 @@ Porto is an agent/background menu-bar app, so it has no Dock icon or main
 window. Click the `Porto` network status item to open the popover. Opening it
 starts the first scan; while it remains visible, refreshes are requested every
 2 seconds. These background updates are silent; the refresh button only indicates
-a user-requested refresh. Closing it stops recurring scans. Use the overflow menu for About
-Porto and Quit Porto.
+a user-requested refresh. Closing it cancels the refresh loop, pending scans,
+and any in-progress remote control workflow. Use the overflow menu for
+Settings, About Porto, and Quit Porto.
 
 The default view is developer-focused for This Mac: it hides known macOS
 infrastructure plus Zen and Discord helper processes by name, while keeping
 custom project ports visible. Remote targets hide common host-service ports
 (22, 53, 80, 123, 137–139, 161–162, 443, 445, and 5353) while keeping custom
-project ports visible. Remote `Unknown process` rows are hidden; published
-Docker ports are retained—even when they use a common host-service port—and
-labeled `Docker · <container>` from optional Docker metadata. IPv4/IPv6, TCP/UDP,
+project ports visible. Remote `Unknown process` rows are hidden; every Docker
+row and every published Docker host port is retained—even when it uses a common
+host-service port—and the display name is the container name without the
+generated `Docker ·` prefix. Docker display names are presentation-only and are
+never used as control targets. IPv4/IPv6, TCP/UDP,
 and multiple published host-port records for the same target, container ID, and
 activity kind are shown as one logical row. The row lists each host port once
 (for example, `53, 80`) and combines protocol and endpoint details; different
 containers remain separate even when their visible names match. The filter is
 applied after parsing, so scan diagnostics still account for every valid remote
 record. Rows without a usable Docker ID stay at socket-level granularity.
-Listeners and active connections appear together in one list, sorted by the
-first local port in each row.
+Listeners appear first, with active connections in a collapsed section, sorted
+by the first local port in each row.
 
 OrbStack runs on this Mac rather than as a separate remote target. Its
 host-published listeners are included in the This Mac scan while OrbStack is
@@ -111,19 +114,30 @@ options shown above. Porto optionally reads published ports with a bounded
 the existing `timeout` utility; containers without a published host port are
 not represented by that metadata. A Docker metadata timeout or failure never
 changes the `ss` result. Ownerless non-Docker rows are hidden unless they match
-a published Docker port, while names and Linux PIDs remain informational only.
-No
-remote signal, `sudo`, `doas`, helper installation, configuration change, or
-privilege escalation is attempted.
+a published Docker port. Eligible remote process rows can be controlled
+through the validated Linux PID and socket identity. Eligible Docker rows are
+controlled at container level through a validated container ID; Porto never
+falls back to a Docker host PID and never uses the display name as a target.
+The SSH account must have permission to signal the process or use the Docker
+CLI/daemon. Porto does not install helpers, invoke `sudo`/`doas`, change
+configuration, or bypass permissions; unavailable capabilities leave the row
+visible with controls disabled or an explanatory failure.
+
+Remote control is one bounded, cancellable workflow shared by scans and signal
+operations. The `×` action revalidates the target before sending SIGTERM, then
+checks for exit for up to 2 seconds. Force Kill is a separate, explicit,
+confirmed action that performs fresh validation before SIGKILL; Porto never
+escalates automatically. Closing the popover cancels the active workflow and
+its SSH child, and no stale result or signal may publish afterward.
 
 Remote scans run only while the popover is visible (or after an explicit retry).
 Completion schedules the next visible refresh after 2 seconds. Failures use
 bounded backoff of 2, 4, 8, 16, then 30 seconds. One successful snapshot per
 target is retained in memory until Porto quits; a failed refresh shows that
 target's last results as stale and never replaces them with an empty list.
-`Available over SSH` describes a successful fixed command, not a persistent SSH
-connection. A listener is evidence on the selected server, not a reachability
-or public-exposure test.
+Remote scans use short-lived SSH children; Porto does not present a persistent
+connection state. A listener is evidence on the selected server, not a
+reachability or public-exposure test.
 
 Troubleshooting follows the status shown in the popover: add a literal alias if
 the picker is empty; establish the host key and noninteractive credentials with
@@ -144,6 +158,7 @@ period and requires confirmation. Activity Monitor should show no normal
 open.
 
 Porto does not persist port/process data or collect telemetry. Selecting a
-remote target intentionally sends the fixed `ss` query through the user's SSH
-configuration; This Mac scans remain local and Porto does not make any other
-network requests. Porto does not use privileged helpers or elevated scans.
+remote target intentionally sends the fixed scan or validated control command
+through the user's SSH configuration; This Mac scans remain local and Porto
+does not make any other network requests. Porto does not use privileged helpers
+or elevated scans.
