@@ -146,6 +146,11 @@ struct DockerPortCatalog: Equatable, Sendable {
             accumulator.localPorts.formUnion(row.localPorts)
             accumulator.transports.formUnion(row.transports)
             accumulator.endpoints.formUnion(row.endpoints)
+            if let socketIdentity = row.remoteSocketIdentity {
+                accumulator.socketIdentities.insert(socketIdentity)
+            } else {
+                accumulator.hasMissingSocketIdentity = true
+            }
             if let pid = row.pid {
                 accumulator.pids.insert(pid)
             } else {
@@ -171,7 +176,8 @@ struct DockerPortCatalog: Equatable, Sendable {
             transports: row.transports,
             processName: "Docker · " + annotation.containerNames.joined(separator: ", "),
             endpoints: row.endpoints,
-            activityKind: row.activityKind
+            activityKind: row.activityKind,
+            remoteSocketIdentity: row.remoteSocketIdentity
         )
     }
 
@@ -227,6 +233,9 @@ struct DockerPortCatalog: Equatable, Sendable {
         let pid: Int32? = accumulator.hasMissingPID || accumulator.pids.count != 1
             ? nil
             : accumulator.pids.first
+        let socketIdentity = accumulator.hasMissingSocketIdentity
+            ? nil
+            : accumulator.socketIdentities.sorted().joined(separator: ",")
         return PortProcess(
             id: Self.dockerRowID(
                 targetID: key.targetID,
@@ -241,7 +250,8 @@ struct DockerPortCatalog: Equatable, Sendable {
             },
             processName: "Docker · " + accumulator.containerNames.sorted().joined(separator: ", "),
             endpoints: accumulator.endpoints.sorted(by: dockerEndpointSort),
-            activityKind: key.activityKind
+            activityKind: key.activityKind,
+            remoteSocketIdentity: socketIdentity
         )
     }
 
@@ -296,6 +306,8 @@ private struct DockerRowAccumulator {
     var endpoints: Set<Endpoint> = []
     var pids: Set<Int32> = []
     var hasMissingPID = false
+    var socketIdentities: Set<String> = []
+    var hasMissingSocketIdentity = false
 }
 
 private func dockerEndpointSort(_ lhs: Endpoint, _ rhs: Endpoint) -> Bool {

@@ -13,35 +13,32 @@ struct PortTargetID: Hashable, Sendable, Codable {
 
     static let local = PortTargetID(rawValue: "local")
 
-    static func ssh(alias: String) -> PortTargetID {
-        let encoded = Data(alias.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return PortTargetID(rawValue: "ssh:\(encoded)")
+    static func remote(profileID: UUID) -> PortTargetID {
+        PortTargetID(rawValue: "remote:\(profileID.uuidString)")
     }
+
 }
 
 enum PortTarget: Hashable, Sendable, Codable {
     case local
-    case ssh(SSHHost)
+    case remote(RemoteServerProfile)
 
     var id: PortTargetID {
         switch self {
         case .local: .local
-        case let .ssh(host): .ssh(alias: host.alias)
+        case let .remote(profile): .remote(profileID: profile.id)
         }
     }
 
     var displayName: String {
         switch self {
         case .local: "This Mac"
-        case let .ssh(host): host.alias
+        case let .remote(profile): profile.displayName
         }
     }
 
     var isRemote: Bool {
-        if case .ssh = self { return true }
+        if case .remote = self { return true }
         return false
     }
 }

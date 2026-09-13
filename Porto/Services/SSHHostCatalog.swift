@@ -17,24 +17,31 @@ struct SSHHostCatalog: Sendable {
     private let sshDirectory: URL
     private let environment: [String: String]
     private let limits: Limits
+    private let defaultUsername: String?
 
     init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaultUsername: String? = nil,
         limits: Limits = .standard
     ) {
         sshDirectory = homeDirectory.appendingPathComponent(".ssh", isDirectory: true)
         self.environment = environment
+        let resolvedUsername = defaultUsername ?? environment["USER"] ?? environment["LOGNAME"] ?? NSUserName()
+        self.defaultUsername = Self.isSafeUsername(resolvedUsername) ? resolvedUsername : nil
         self.limits = limits
     }
 
     init(
         sshDirectory: URL,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaultUsername: String? = nil,
         limits: Limits = .standard
     ) {
         self.sshDirectory = sshDirectory
         self.environment = environment
+        let resolvedUsername = defaultUsername ?? environment["USER"] ?? environment["LOGNAME"] ?? NSUserName()
+        self.defaultUsername = Self.isSafeUsername(resolvedUsername) ? resolvedUsername : nil
         self.limits = limits
     }
 
@@ -43,6 +50,7 @@ struct SSHHostCatalog: Sendable {
         guard Self.itemExists(at: rootURL) else {
             return SSHHostCatalogResult(
                 hosts: [],
+                candidates: [],
                 diagnostics: [],
                 retainedPreviousCatalog: false,
                 filesRead: 0,
@@ -52,6 +60,7 @@ struct SSHHostCatalog: Sendable {
         guard Self.isRegularFile(at: rootURL) else {
             return SSHHostCatalogResult(
                 hosts: [],
+                candidates: [],
                 diagnostics: [.rootIsNotRegularFile],
                 retainedPreviousCatalog: false,
                 filesRead: 0,
@@ -62,20 +71,28 @@ struct SSHHostCatalog: Sendable {
         var state = LoadState()
         let rootRead = readConfiguration(at: rootURL, depth: 0, isRoot: true, state: &state)
         if rootRead == .failed {
+            let visiblePrevious = previous.filter { !Self.isHiddenAlias($0.alias) }
             return SSHHostCatalogResult(
-                hosts: previous,
+                hosts: visiblePrevious,
+                candidates: visiblePrevious.compactMap { host in
+                    guard let defaultUsername else { return nil }
+                    return SSHHostCandidate(alias: host.alias, host: host.alias, username: defaultUsername)
+                },
                 diagnostics: state.diagnostics,
-                retainedPreviousCatalog: !previous.isEmpty,
+                retainedPreviousCatalog: !visiblePrevious.isEmpty,
                 filesRead: state.filesRead,
                 bytesRead: state.bytesRead
             )
         }
 
-        let aliases = Self.sortedAndDeduplicated(
-            state.aliases.filter { !Self.isHiddenAlias($0) }
-        )
+        let visibleCandidates = state.candidates.values.filter { !Self.isHiddenAlias($0.alias) }
+        let candidates = Self.sortedAndDeduplicated(visibleCandidates.compactMap { metadata in
+            metadata.candidate(defaultUsername: defaultUsername)
+        })
+        let hosts = Self.sortedAliases(visibleCandidates.map(\.alias)).map(SSHHost.init(alias:))
         return SSHHostCatalogResult(
-            hosts: aliases.map(SSHHost.init(alias:)),
+            hosts: hosts,
+            candidates: candidates,
             diagnostics: state.diagnostics,
             retainedPreviousCatalog: false,
             filesRead: state.filesRead,
@@ -132,6 +149,7 @@ struct SSHHostCatalog: Sendable {
         let contents = String(decoding: data, as: UTF8.self)
         let logicalContents = Self.removingLineContinuations(from: contents)
         var insideMatch = false
+        var activeAliases: [String] = []
 
         for rawLine in logicalContents.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             guard let directive = Self.parseDirective(String(rawLine)) else { continue }
@@ -140,7 +158,14 @@ struct SSHHostCatalog: Sendable {
                 insideMatch = true
             case "host":
                 insideMatch = false
-                state.aliases.append(contentsOf: directive.arguments.filter(Self.isSafeLiteralAlias))
+                activeAliases = []
+                for alias in directive.arguments where Self.isSafeLiteralAlias(alias) {
+                    let foldedAlias = Self.caseFold(alias)
+                    guard state.candidates[foldedAlias] == nil,
+                          !activeAliases.contains(where: { Self.caseFold($0) == foldedAlias }) else { continue }
+                    activeAliases.append(alias)
+                    state.candidates[foldedAlias] = CandidateMetadata(alias: alias)
+                }
             case "include" where !insideMatch:
                 for pattern in directive.arguments {
                     for includedURL in expandedIncludeURLs(for: pattern) {
@@ -151,6 +176,33 @@ struct SSHHostCatalog: Sendable {
                             state: &state
                         )
                     }
+                }
+            case let keyword where !insideMatch && ["hostname", "user", "port", "identityfile"].contains(keyword.lowercased()):
+                for alias in activeAliases {
+                    guard var metadata = state.candidates[Self.caseFold(alias)] else { continue }
+                    switch keyword.lowercased() {
+                    case "hostname":
+                        if metadata.host == nil, let value = directive.arguments.first, Self.isSafeHost(value) {
+                            metadata.host = value
+                        }
+                    case "user":
+                        if metadata.username == nil, let value = directive.arguments.first, Self.isSafeUsername(value) {
+                            metadata.username = value
+                        }
+                    case "port":
+                        if metadata.port == nil, let value = directive.arguments.first,
+                           let port = Int(value), (1...65_535).contains(port) {
+                            metadata.port = port
+                        }
+                    case "identityfile":
+                        if metadata.identityFilePath == nil, let value = directive.arguments.first,
+                           value.lowercased() != "none", Self.isSafeIdentityPath(value),
+                           let path = materializedIdentityPath(value) {
+                            metadata.identityFilePath = path
+                        }
+                    default: break
+                    }
+                    state.candidates[Self.caseFold(alias)] = metadata
                 }
             default:
                 continue
@@ -340,38 +392,68 @@ struct SSHHostCatalog: Sendable {
         }
     }
 
-    private static func sortedAndDeduplicated(_ aliases: [String]) -> [String] {
-        let sorted = aliases.sorted { lhs, rhs in
+    private static func sortedAndDeduplicated(_ candidates: [SSHHostCandidate]) -> [SSHHostCandidate] {
+        candidates.sorted { lhs, rhs in
+            let comparison = lhs.alias.localizedCaseInsensitiveCompare(rhs.alias)
+            if comparison != .orderedSame { return comparison == .orderedAscending }
+            return lhs.alias < rhs.alias
+        }
+    }
+
+    private static func sortedAliases(_ aliases: [String]) -> [String] {
+        aliases.sorted { lhs, rhs in
             let comparison = lhs.localizedCaseInsensitiveCompare(rhs)
             if comparison != .orderedSame { return comparison == .orderedAscending }
             return lhs < rhs
         }
-        var seen: Set<String> = []
-        return sorted.filter { alias in
-            // SSH host names are case-insensitive. Use a locale-independent
-            // fold for dedupe, while display ordering follows the product rule.
-            seen.insert(asciiCaseFold(alias)).inserted
-        }
     }
 
-    /// These entries are not user-selectable Linux targets. GitHub's host
-    /// entry is an authentication-key configuration, while OrbStack's
-    /// generated alias routes back into the local Mac and is represented by
-    /// the This Mac scan instead.
+    /// GitHub's host entry is an authentication-key configuration rather than
+    /// a user-selectable Linux target.
     private static func isHiddenAlias(_ alias: String) -> Bool {
-        switch alias.lowercased() {
-        case "github.com", "orb": return true
+        switch caseFold(alias) {
+        case "github.com": return true
         default: return false
         }
     }
 
-    private static func asciiCaseFold(_ value: String) -> String {
+    private static func caseFold(_ value: String) -> String {
         String(value.unicodeScalars.map { scalar in
             if (65...90).contains(scalar.value), let folded = UnicodeScalar(scalar.value + 32) {
                 return Character(folded)
             }
             return Character(scalar)
         })
+    }
+
+    private static func isSafeHost(_ value: String) -> Bool {
+        isSafeLiteral(value) && !value.contains("%") &&
+            value.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || ".:-_[]".unicodeScalars.contains($0) }
+    }
+
+    private static func isSafeUsername(_ value: String) -> Bool {
+        isSafeLiteral(value) && value.first != "-" &&
+            value.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || "_-.".unicodeScalars.contains($0) }
+    }
+
+    private static func isSafeIdentityPath(_ value: String) -> Bool {
+        isSafeLiteral(value) && !value.contains("%") && !value.contains(where: { "*$?;|&`(){}<>".contains($0) }) &&
+            (!value.hasPrefix("~") || value == "~" || value.hasPrefix("~/"))
+    }
+
+    private func materializedIdentityPath(_ value: String) -> String? {
+        guard Self.isSafeIdentityPath(value) else { return nil }
+        let homeDirectory = sshDirectory.deletingLastPathComponent()
+        if value == "~" { return homeDirectory.standardizedFileURL.path }
+        if value.hasPrefix("~/") {
+            return homeDirectory.appendingPathComponent(String(value.dropFirst(2))).standardizedFileURL.path
+        }
+        if value.hasPrefix("/") { return value }
+        return sshDirectory.appendingPathComponent(value).standardizedFileURL.path
+    }
+
+    private static func isSafeLiteral(_ value: String) -> Bool {
+        !value.isEmpty && !value.hasPrefix("-") && !value.unicodeScalars.contains { $0.properties.isWhitespace || CharacterSet.controlCharacters.contains($0) }
     }
 
     private static func itemExists(at url: URL) -> Bool {
@@ -403,6 +485,7 @@ struct SSHHostCatalog: Sendable {
 
 struct SSHHostCatalogResult: Equatable, Sendable {
     let hosts: [SSHHost]
+    let candidates: [SSHHostCandidate]
     let diagnostics: [SSHHostCatalogDiagnostic]
     let retainedPreviousCatalog: Bool
     let filesRead: Int
@@ -432,7 +515,7 @@ private extension SSHHostCatalog {
     }
 
     struct LoadState {
-        var aliases: [String] = []
+        var candidates: [String: CandidateMetadata] = [:]
         var diagnostics: [SSHHostCatalogDiagnostic] = []
         var visitedCanonicalPaths: Set<String> = []
         var filesRead = 0
@@ -441,6 +524,36 @@ private extension SSHHostCatalog {
         mutating func append(_ diagnostic: SSHHostCatalogDiagnostic) {
             guard diagnostics.count < 64 else { return }
             diagnostics.append(diagnostic)
+        }
+    }
+
+    struct CandidateMetadata {
+        let alias: String
+        var host: String?
+        var username: String?
+        var port: Int?
+        var identityFilePath: String?
+
+        func candidate(defaultUsername: String?) -> SSHHostCandidate? {
+            guard let username = username ?? defaultUsername else { return nil }
+            let directHost = host ?? alias
+            let directPort = port ?? 22
+            let profile = RemoteServerProfile(
+                displayName: alias,
+                host: directHost,
+                username: username,
+                port: directPort,
+                identityFilePath: identityFilePath,
+                isEnabled: false
+            )
+            guard (try? profile.validate()) != nil else { return nil }
+            return SSHHostCandidate(
+                alias: alias,
+                host: directHost,
+                username: username,
+                port: directPort,
+                identityFilePath: identityFilePath
+            )
         }
     }
 }

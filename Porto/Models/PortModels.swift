@@ -1,5 +1,44 @@
 import Foundation
 
+/// A safe, direct SSH connection description discovered from local config.
+/// The alias is display-only; callers should pass the fields explicitly.
+struct SSHHostCandidate: Identifiable, Hashable, Codable, Sendable {
+    let id: String
+    let alias: String
+    let host: String
+    let username: String
+    let port: Int
+    let identityFilePath: String?
+
+    var displayID: String { alias }
+    var label: String { alias }
+    var addressLabel: String {
+        guard port != 22 else { return host }
+        if host.contains(":"), !host.hasPrefix("[") {
+            return "[\(host)]:\(port)"
+        }
+        return "\(host):\(port)"
+    }
+
+    init(alias: String, host: String, username: String, port: Int = 22, identityFilePath: String? = nil) {
+        self.id = "ssh:" + Self.caseFold(alias)
+        self.alias = alias
+        self.host = host
+        self.username = username
+        self.port = port
+        self.identityFilePath = identityFilePath
+    }
+
+    private static func caseFold(_ value: String) -> String {
+        String(value.unicodeScalars.map { scalar in
+            if (65...90).contains(scalar.value), let folded = UnicodeScalar(scalar.value + 32) {
+                return Character(folded)
+            }
+            return Character(scalar)
+        })
+    }
+}
+
 enum PortActivityKind: String, Sendable, CaseIterable, Codable {
     case listener
     case connection
@@ -51,6 +90,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let processName: String
     let endpoints: [Endpoint]
     let activityKind: PortActivityKind
+    /// Stable per-socket identity from remote Linux `ss -e` output, when available.
+    let remoteSocketIdentity: String?
 
     init(
         id: String,
@@ -59,7 +100,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         transport: TransportProtocol,
         processName: String,
         endpoints: [Endpoint],
-        activityKind: PortActivityKind
+        activityKind: PortActivityKind,
+        remoteSocketIdentity: String? = nil
     ) {
         self.init(
             id: id,
@@ -68,7 +110,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
             transports: [transport],
             processName: processName,
             endpoints: endpoints,
-            activityKind: activityKind
+            activityKind: activityKind,
+            remoteSocketIdentity: remoteSocketIdentity
         )
     }
 
@@ -79,7 +122,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         transports: [TransportProtocol],
         processName: String,
         endpoints: [Endpoint],
-        activityKind: PortActivityKind
+        activityKind: PortActivityKind,
+        remoteSocketIdentity: String? = nil
     ) {
         self.id = id
         self.origin = origin
@@ -95,6 +139,7 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         self.processName = processName
         self.endpoints = endpoints
         self.activityKind = activityKind
+        self.remoteSocketIdentity = remoteSocketIdentity
     }
 
     init(
@@ -104,7 +149,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         transport: TransportProtocol,
         processName: String,
         endpoints: [Endpoint],
-        activityKind: PortActivityKind
+        activityKind: PortActivityKind,
+        remoteSocketIdentity: String? = nil
     ) {
         self.init(
             id: id,
@@ -113,7 +159,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
             transports: [transport],
             processName: processName,
             endpoints: endpoints,
-            activityKind: activityKind
+            activityKind: activityKind,
+            remoteSocketIdentity: remoteSocketIdentity
         )
     }
 
@@ -124,7 +171,8 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         transports: [TransportProtocol],
         processName: String,
         endpoints: [Endpoint],
-        activityKind: PortActivityKind
+        activityKind: PortActivityKind,
+        remoteSocketIdentity: String? = nil
     ) {
         let uniqueLocalPorts = Set(localPorts).sorted()
         precondition(!uniqueLocalPorts.isEmpty, "PortProcess requires at least one local port")
@@ -143,6 +191,7 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
         self.processName = processName
         self.endpoints = endpoints
         self.activityKind = activityKind
+        self.remoteSocketIdentity = remoteSocketIdentity
     }
 
     init(
@@ -186,7 +235,10 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     }
 
     var isActionable: Bool {
-        localIdentity != nil
+        if isRemote {
+            return (pid ?? 0) > 0 && remoteSocketIdentity?.isEmpty == false
+        }
+        return localIdentity != nil
     }
 
     var isRemote: Bool {

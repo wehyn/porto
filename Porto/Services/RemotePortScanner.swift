@@ -1,29 +1,30 @@
 import Foundation
 
 actor RemotePortScanner: PortSnapshotScanning {
-    private let host: SSHHost
+    let profile: RemoteServerProfile
     private let runner: any SSHCommandRunning
     private let outputParser: RemotePortOutputParser
     private let visibilityPolicy: PortVisibilityPolicy
 
     init(
-        host: SSHHost,
+        profile: RemoteServerProfile,
         runner: any SSHCommandRunning = SSHCommandRunner(),
         parser: SsParser = SsParser(),
         visibilityPolicy: PortVisibilityPolicy = .remoteFocused
     ) {
-        self.host = host
+        self.profile = profile
         self.runner = runner
         self.outputParser = RemotePortOutputParser(ssParser: parser)
         self.visibilityPolicy = visibilityPolicy
     }
 
     func scan(_ request: PortScanRequest) async -> PortScanOutcome {
-        guard request.targetID == PortTarget.ssh(host).id else {
+        let expectedTargetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        guard request.targetID == expectedTargetID else {
             return failure(.readFailed, request: request, diagnostics: .empty)
         }
 
-        let execution = await runner.run(alias: host.alias)
+        let execution = await runner.run(profile: profile, operation: .scan)
         let base = ScanDiagnostics(
             stdoutBytes: execution.stdout.count,
             stderrBytes: execution.stderr.count,
@@ -87,7 +88,7 @@ actor RemotePortScanner: PortSnapshotScanning {
 
     private func mapRunnerFailure(_ failure: SSHCommandRunnerFailure) -> RemoteScanFailure {
         switch failure {
-        case .invalidAlias: .launchFailed
+        case .invalidProfile: .launchFailed
         case .launchFailed:
             FileManager.default.isExecutableFile(atPath: SSHCommandRunner.executableURL.path)
                 ? .launchFailed : .sshNotFound

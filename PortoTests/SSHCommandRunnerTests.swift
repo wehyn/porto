@@ -16,7 +16,8 @@ final class SSHCommandRunnerTests: XCTestCase {
             ]
         )
 
-        let result = await runner.run(alias: "Production Linux")
+        let targetProfile = profile(host: "prod.example", username: "remote-user")
+        let result = await runner.run(profile: targetProfile, operation: .scan)
 
         XCTAssertEqual(SSHCommandRunner.executableURL.path, "/usr/bin/ssh")
         XCTAssertNil(result.failure)
@@ -26,7 +27,7 @@ final class SSHCommandRunnerTests: XCTestCase {
         XCTAssertEqual(
             String(decoding: result.stdout, as: UTF8.self).split(separator: "\n").map(String.init),
             ["LC_ALL=C", "SSH_AUTH_SOCK=/tmp/porto-test-agent.sock"]
-                + expectedArguments(alias: "Production Linux").map { "ARG=\($0)" }
+                + expectedArguments(profile: targetProfile).map { "ARG=\($0)" }
         )
     }
 
@@ -38,7 +39,7 @@ final class SSHCommandRunnerTests: XCTestCase {
             environment: ["PORTO_RUNNER_TEST": "success"]
         )
 
-        let result = await runner.run(alias: "host")
+        let result = await runner.run(profile: profile(), operation: .scan)
 
         XCTAssertNil(result.failure)
         XCTAssertEqual(result.stdout, Data("socket output\n".utf8))
@@ -50,16 +51,17 @@ final class SSHCommandRunnerTests: XCTestCase {
         let fixture = try makeFixtureExecutable()
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
-        let firstTask = Task { await runner.run(alias: "slow") }
+        let slowProfile = profile(host: "slow")
+        let firstTask = Task { await runner.run(profile: slowProfile, operation: .scan) }
         try await Task.sleep(for: .milliseconds(50))
 
-        let secondResult = await runner.run(alias: "host")
+        let secondResult = await runner.run(profile: profile(), operation: .scan)
         firstTask.cancel()
         let firstResult = await firstTask.value
 
         XCTAssertEqual(secondResult.failure, .busy)
         XCTAssertEqual(firstResult.failure, .cancelled)
-        let followUp = await runner.run(alias: "host")
+        let followUp = await runner.run(profile: profile(), operation: .scan)
         XCTAssertNil(followUp.failure)
     }
 
@@ -70,8 +72,9 @@ final class SSHCommandRunnerTests: XCTestCase {
         // host while still exercising the timeout cleanup path with sleep 10.
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .milliseconds(500))
 
-        let result = await runner.run(alias: "slow")
-        let followUp = await runner.run(alias: "host")
+        let slowProfile = profile(host: "slow")
+        let result = await runner.run(profile: slowProfile, operation: .scan)
+        let followUp = await runner.run(profile: profile(), operation: .scan)
 
         XCTAssertEqual(result.failure, .timedOut)
         XCTAssertEqual(result.terminationReason, .signal)
@@ -82,12 +85,13 @@ final class SSHCommandRunnerTests: XCTestCase {
         let fixture = try makeFixtureExecutable()
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
-        let task = Task { await runner.run(alias: "slow") }
+        let slowProfile = profile(host: "slow")
+        let task = Task { await runner.run(profile: slowProfile, operation: .scan) }
         try await Task.sleep(for: .milliseconds(50))
 
         task.cancel()
         let result = await task.value
-        let followUp = await runner.run(alias: "host")
+        let followUp = await runner.run(profile: profile(), operation: .scan)
 
         XCTAssertEqual(result.failure, .cancelled)
         XCTAssertTrue(result.wasCancelled)
@@ -98,11 +102,12 @@ final class SSHCommandRunnerTests: XCTestCase {
         let fixture = try makeFixtureExecutable()
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
-        let task = Task { await runner.run(alias: "slow") }
+        let slowProfile = profile(host: "slow")
+        let task = Task { await runner.run(profile: slowProfile, operation: .scan) }
         try await Task.sleep(for: .milliseconds(50))
 
         await runner.cancelActive()
-        let followUp = await runner.run(alias: "host")
+        let followUp = await runner.run(profile: profile(), operation: .scan)
         let result = await task.value
 
         XCTAssertEqual(result.failure, .cancelled)
@@ -125,8 +130,8 @@ final class SSHCommandRunnerTests: XCTestCase {
             timeout: .seconds(2)
         )
 
-        let stdoutResult = await stdoutRunner.run(alias: "overflow-stdout")
-        let stderrResult = await stderrRunner.run(alias: "overflow-stderr")
+        let stdoutResult = await stdoutRunner.run(profile: profile(host: "overflow-stdout"), operation: .scan)
+        let stderrResult = await stderrRunner.run(profile: profile(host: "overflow-stderr"), operation: .scan)
 
         XCTAssertEqual(stdoutResult.failure, .outputTooLarge(stream: .stdout))
         XCTAssertLessThanOrEqual(stdoutResult.stdout.count, 1_024)
@@ -134,30 +139,61 @@ final class SSHCommandRunnerTests: XCTestCase {
         XCTAssertLessThanOrEqual(stderrResult.stderr.count, 1_024)
     }
 
-    func testLaunchFailureAndInvalidAliasesDoNotStartAChild() async {
+    func testLaunchFailureAndInvalidProfilesDoNotStartAChild() async {
         let runner = SSHCommandRunner(
             executableURL: URL(fileURLWithPath: "/definitely/not-a-porto-executable")
         )
 
-        let launchFailure = await runner.run(alias: "host")
-        let leadingDash = await runner.run(alias: "-oProxyCommand=bad")
-        let controlCharacter = await runner.run(alias: "bad\nhost")
-        let empty = await runner.run(alias: "")
+        let launchFailure = await runner.run(profile: profile(), operation: .scan)
+        var leadingDashProfile = profile()
+        leadingDashProfile.host = "-oProxyCommand=bad"
+        var controlCharacterProfile = profile()
+        controlCharacterProfile.host = "bad\nhost"
+        var emptyProfile = profile()
+        emptyProfile.host = ""
+        let leadingDash = await runner.run(profile: leadingDashProfile, operation: .scan)
+        let controlCharacter = await runner.run(profile: controlCharacterProfile, operation: .scan)
+        let empty = await runner.run(profile: emptyProfile, operation: .scan)
 
         XCTAssertEqual(launchFailure.failure, .launchFailed)
-        XCTAssertEqual(leadingDash.failure, .invalidAlias)
-        XCTAssertEqual(controlCharacter.failure, .invalidAlias)
-        XCTAssertEqual(empty.failure, .invalidAlias)
+        XCTAssertEqual(leadingDash.failure, .invalidProfile)
+        XCTAssertEqual(controlCharacter.failure, .invalidProfile)
+        XCTAssertEqual(empty.failure, .invalidProfile)
     }
 
-    private func expectedArguments(alias: String) -> [String] {
-        [
+    func testCustomPortAndIdentityPathRemainSeparateArgumentsWithoutReadingKey() throws {
+        let targetProfile = profile(host: "[2001:db8::10]", username: "remote-user", port: 2200, identityFilePath: "/tmp/key with spaces")
+
+        let arguments = SSHCommandRunner.arguments(for: targetProfile, operation: .scan)
+
+        XCTAssertEqual(arguments, expectedArguments(profile: targetProfile, hostArgument: "2001:db8::10"))
+        XCTAssertEqual(targetProfile.host, "[2001:db8::10]")
+        let separatorIndex = try XCTUnwrap(arguments?.firstIndex(of: "--"))
+        XCTAssertEqual(arguments?[separatorIndex], "--")
+        XCTAssertEqual(arguments?[separatorIndex + 1], "2001:db8::10")
+        XCTAssertFalse(arguments?.contains { $0.contains("PRIVATE") || $0.contains("BEGIN") } ?? true)
+    }
+
+    private func expectedArguments(profile: RemoteServerProfile, hostArgument: String? = nil) -> [String] {
+        var arguments = [
             "-T",
             "-n",
+            "-F", "/dev/null",
+            "-l", profile.username,
+            "-p", String(profile.port)
+        ]
+        if let identityFilePath = profile.identityFilePath {
+            arguments += ["-i", identityFilePath]
+        }
+        arguments += [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=3",
             "-o", "ConnectionAttempts=1",
             "-o", "NumberOfPasswordPrompts=0",
+            "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no",
+            "-o", "PreferredAuthentications=publickey",
+            "-o", "StrictHostKeyChecking=yes",
             "-o", "PermitLocalCommand=no",
             "-o", "ClearAllForwardings=yes",
             "-o", "RequestTTY=no",
@@ -165,9 +201,26 @@ final class SSHCommandRunnerTests: XCTestCase {
             "-o", "ControlMaster=no",
             "-o", "ControlPath=none",
             "--",
-            alias,
-            "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
+            hostArgument ?? profile.host,
+            SSHCommandRunner.remoteCommand
         ]
+        return arguments
+    }
+
+    private func profile(
+        host: String = "host",
+        username: String = "user",
+        port: Int = 22,
+        identityFilePath: String? = nil
+    ) -> RemoteServerProfile {
+        RemoteServerProfile(
+            displayName: "Test",
+            host: host,
+            username: username,
+            port: port,
+            identityFilePath: identityFilePath,
+            isEnabled: true
+        )
     }
 
     private func makeFixtureExecutable() throws -> URL {

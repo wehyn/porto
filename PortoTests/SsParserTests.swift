@@ -93,6 +93,22 @@ final class SsParserTests: XCTestCase {
         XCTAssertTrue(rows[2].id.contains("tuple="))
     }
 
+    func testOwnerRowsRetainStableSocketIdentityAndIncludeItInID() throws {
+        let target = PortTargetID(rawValue: "ssh:production")
+        let original = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3)) ino:10 sk:first\n".utf8), targetID: target).snapshot.listeners[0]
+        let replacement = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3)) ino:11 sk:second\n".utf8), targetID: target).snapshot.listeners[0]
+
+        XCTAssertEqual(original.remoteSocketIdentity, "sk:first")
+        XCTAssertNotEqual(original.id, replacement.id)
+        XCTAssertNotEqual(original.remoteSocketIdentity, replacement.remoteSocketIdentity)
+    }
+
+    func testOwnerRowsWithoutSocketIdentityAreMarkedUnverified() throws {
+        let row = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3))\n".utf8)).snapshot.listeners[0]
+
+        XCTAssertNil(row.remoteSocketIdentity)
+    }
+
     func testDuplicateSocketsAndMultiSocketOwnersAreGroupedAndEndpointsSorted() throws {
         let text = """
         tcp LISTEN 0 128 [::]:8080 [::]:* users:(("web",pid=50,fd=4)) ino:1

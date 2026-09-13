@@ -51,6 +51,11 @@ struct SsParser: Sendable {
                 }
                 accumulator.pid = owner?.pid
                 accumulator.endpoints.insert(record.endpoint)
+                if let socketIdentity = record.socketIdentity {
+                    accumulator.socketIdentities.insert(socketIdentity)
+                } else {
+                    accumulator.hasMissingSocketIdentity = true
+                }
                 accumulator.idIdentity = owner == nil ? record.fallbackIdentity : ""
                 groups[key] = accumulator
             }
@@ -62,8 +67,12 @@ struct SsParser: Sendable {
 
         let targetComponent = ssHex(targetID.rawValue)
         let rows = groups.map { key, value in
+            let socketIdentity = value.hasMissingSocketIdentity || value.socketIdentities.isEmpty
+                ? nil
+                : value.socketIdentities.sorted().joined(separator: ",")
             let identity = value.pid.map {
                 "pid=\($0);name=\(ssHex(SsOwner(pid: $0, name: value.processName).normalizedName))"
+                    + (socketIdentity.map { ";socket=\(ssHex($0))" } ?? "")
             } ?? value.idIdentity
             let id = [
                 "remote", "target=\(targetComponent)", key.activityKind.rawValue,
@@ -76,7 +85,8 @@ struct SsParser: Sendable {
                 transport: key.transport,
                 processName: value.processName,
                 endpoints: value.endpoints.sorted(by: ssEndpointSort),
-                activityKind: key.activityKind
+                activityKind: key.activityKind,
+                remoteSocketIdentity: socketIdentity
             )
         }
         let listeners = PortProcessSort.sort(rows.filter { $0.activityKind == .listener })
@@ -95,6 +105,7 @@ private struct SsRecord {
     let endpoint: Endpoint
     let owners: [SsOwner]
     let fallbackIdentity: String
+    let socketIdentity: String?
 
     static func parse(_ line: String) -> SsRecord? {
         let columns = line.split(maxSplits: 6, whereSeparator: \Character.isWhitespace)
@@ -152,6 +163,8 @@ private struct SsRecord {
         let tail = columns.count == 7 ? String(columns[6]) : ""
         let metadata = SsMetadata.parse(tail)
         let tuple = "tuple=\(ssHex("\(transport.rawValue)|\(state)|\(rawEndpoint)"))"
+        let socketIdentity = metadata.cookie.map { "sk:\($0)" }
+            ?? metadata.inode.map { "ino:\($0)" }
         let fallback = metadata.cookie.map { "cookie=\(ssHex($0))" }
             ?? metadata.inode.map { "inode=\(ssHex($0))" }
             ?? tuple
@@ -160,7 +173,8 @@ private struct SsRecord {
             activityKind: activityKind,
             endpoint: endpoint,
             owners: metadata.owners,
-            fallbackIdentity: fallback
+            fallbackIdentity: fallback,
+            socketIdentity: socketIdentity
         )
     }
 }
@@ -297,6 +311,8 @@ private struct SsGroupAccumulator {
     var pid: Int32?
     var endpoints: Set<Endpoint> = []
     var idIdentity = ""
+    var socketIdentities: Set<String> = []
+    var hasMissingSocketIdentity = false
 }
 
 private func ssMatchingParenthesis(in text: String, from open: String.Index) -> String.Index? {

@@ -54,6 +54,12 @@ enum RemoteScanFailure: Error, Equatable, Sendable {
     }
 }
 
+enum RemoteConnectionTestResult: Equatable, Sendable {
+    case success
+    case failed(RemoteScanFailure)
+    case refusedDisabled
+}
+
 enum PortScanFailure: Error, Equatable, Sendable {
     case local(ScanFailure)
     case remote(RemoteScanFailure)
