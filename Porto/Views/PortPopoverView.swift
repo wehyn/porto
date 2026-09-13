@@ -60,7 +60,7 @@ struct PortPopoverView: View {
             .keyboardShortcut("r", modifiers: [.command])
 
             Menu {
-                Button("Settings…") { openWindow(id: "settings") }
+                Button("Settings…") { openSettings() }
                 Divider()
                 Button("About Porto") {
                     NSApp.activate(ignoringOtherApps: true)
@@ -77,6 +77,15 @@ struct PortPopoverView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+    }
+
+    private func openSettings() {
+        openWindow(id: "settings")
+        Task { @MainActor in
+            await Task.yield()
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first(where: { $0.title == "Settings" })?.makeKeyAndOrderFront(nil)
+        }
     }
 
     private var targetSelector: some View {
