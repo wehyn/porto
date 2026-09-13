@@ -26,6 +26,8 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(row.pid, 42)
         XCTAssertTrue(row.isActionable)
         XCTAssertTrue(row.isRemote)
+        XCTAssertEqual(row.source, .remoteProcess)
+        XCTAssertEqual(row.controlTarget, .remoteProcess(targetID: targetID, pid: 42))
         let operations = await runner.operations()
         XCTAssertEqual(operations, [.scan])
     }
@@ -69,7 +71,8 @@ final class RemotePortScannerTests: XCTestCase {
 
         guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
         XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [53, 8080])
-        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · pihole", "Docker · moneyprinterturbo-api"])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["pihole", "moneyprinterturbo-api"])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.source), [.dockerContainer(containerID: "2b4f94051c6e"), .dockerContainer(containerID: "f4bacc4f39f8")])
         XCTAssertTrue(snapshot.snapshot.connections.isEmpty)
         XCTAssertEqual(snapshot.diagnostics.validRecords, 4)
     }
@@ -89,7 +92,9 @@ final class RemotePortScannerTests: XCTestCase {
 
         XCTAssertEqual(snapshot.snapshot.listeners.count, 1)
         let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
-        XCTAssertEqual(row.processName, "Docker · pihole")
+        XCTAssertEqual(row.processName, "pihole")
+        XCTAssertEqual(row.controlTarget, .remoteDocker(targetID: targetID, containerID: "2b4f94051c6e"))
+        XCTAssertEqual(row.source, .dockerContainer(containerID: "2b4f94051c6e"))
         XCTAssertEqual(row.localPort, 53)
         XCTAssertEqual(row.localPorts, [53])
         XCTAssertEqual(row.transports, [.tcp, .udp])
@@ -114,7 +119,7 @@ final class RemotePortScannerTests: XCTestCase {
 
         XCTAssertEqual(snapshot.snapshot.listeners.count, 1)
         let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
-        XCTAssertEqual(row.processName, "Docker · pihole")
+        XCTAssertEqual(row.processName, "pihole")
         XCTAssertEqual(row.localPort, 53)
         XCTAssertEqual(row.localPorts, [53, 80])
         XCTAssertEqual(row.transports, [.tcp, .udp])
@@ -133,20 +138,20 @@ final class RemotePortScannerTests: XCTestCase {
         tcp LISTEN 0 128 0.0.0.0:6565 0.0.0.0:* ino:6565-v4 sk:6565-v4
         tcp LISTEN 0 128 [::]:6565 [::]:* ino:6565-v6 sk:6565-v6
         __PORTO_DOCKER__
-        pihole-id\tpihole\t0.0.0.0:80->80/tcp, [::]:80->80/tcp
-        omniroute-id\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
-        immich-id\timmich_server\t0.0.0.0:2283->2283/tcp, [::]:2283->2283/tcp
-        filebrowser-id\tfilebrowser-filebrowser-1\t0.0.0.0:6565->80/tcp, [::]:6565->80/tcp
+        aaaaaaaaaaaa\tpihole\t0.0.0.0:80->80/tcp, [::]:80->80/tcp
+        bbbbbbbbbbbb\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
+        cccccccccccc\timmich_server\t0.0.0.0:2283->2283/tcp, [::]:2283->2283/tcp
+        dddddddddddd\tfilebrowser-filebrowser-1\t0.0.0.0:6565->80/tcp, [::]:6565->80/tcp
         """
 
         let snapshot = try await scan(output)
 
         XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [80, 1455, 2283, 6565])
         XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), [
-            "Docker · pihole",
-            "Docker · omniroute",
-            "Docker · immich_server",
-            "Docker · filebrowser-filebrowser-1"
+            "pihole",
+            "omniroute",
+            "immich_server",
+            "filebrowser-filebrowser-1"
         ])
         XCTAssertTrue(snapshot.snapshot.listeners.allSatisfy { $0.endpoints.count == 2 && $0.transports == [.tcp] })
         XCTAssertEqual(snapshot.diagnostics.validRecords, 8)
@@ -157,24 +162,24 @@ final class RemotePortScannerTests: XCTestCase {
         tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
         tcp LISTEN 0 128 [::]:1455 [::]:* ino:2 sk:two
         __PORTO_DOCKER__
-        container-a\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
+        aaaaaaaaaaaa\tomniroute\t0.0.0.0:1455->1455/tcp, [::]:1455->1455/tcp
         """
         let reversedFamilies = """
         tcp LISTEN 0 128 [::]:1455 [::]:* ino:2 sk:two
         tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
         __PORTO_DOCKER__
-        container-a\tomniroute\t[::]:1455->1455/tcp, 0.0.0.0:1455->1455/tcp
+        aaaaaaaaaaaa\tomniroute\t[::]:1455->1455/tcp, 0.0.0.0:1455->1455/tcp
         """
         let singleFamily = """
         tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
         __PORTO_DOCKER__
-        container-a\tomniroute\t0.0.0.0:1455->1455/tcp
+        aaaaaaaaaaaa\tomniroute\t0.0.0.0:1455->1455/tcp
         """
         let twoPorts = """
         tcp LISTEN 0 128 0.0.0.0:1455 0.0.0.0:* ino:1 sk:one
         tcp LISTEN 0 128 0.0.0.0:2283 0.0.0.0:* ino:3 sk:three
         __PORTO_DOCKER__
-        container-a\tomniroute\t0.0.0.0:1455->1455/tcp, 0.0.0.0:2283->2283/tcp
+        aaaaaaaaaaaa\tomniroute\t0.0.0.0:1455->1455/tcp, 0.0.0.0:2283->2283/tcp
         """
 
         let firstSnapshot = try await scan(bothFamilies)
@@ -198,14 +203,14 @@ final class RemotePortScannerTests: XCTestCase {
         tcp LISTEN 0 128 127.0.0.1:8080 127.0.0.1:* ino:1 sk:one
         tcp LISTEN 0 128 192.0.2.10:8080 192.0.2.10:* ino:2 sk:two
         __PORTO_DOCKER__
-        container-a\tsame-name\t127.0.0.1:8080->8080/tcp
-        container-b\tsame-name\t192.0.2.10:8080->8080/tcp
+        aaaaaaaaaaaa\tsame-name\t127.0.0.1:8080->8080/tcp
+        bbbbbbbbbbbb\tsame-name\t192.0.2.10:8080->8080/tcp
         """
 
         let snapshot = try await scan(output)
 
         XCTAssertEqual(snapshot.snapshot.listeners.count, 2)
-        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · same-name", "Docker · same-name"])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["same-name", "same-name"])
         XCTAssertNotEqual(snapshot.snapshot.listeners[0].id, snapshot.snapshot.listeners[1].id)
     }
 
@@ -220,7 +225,11 @@ final class RemotePortScannerTests: XCTestCase {
         let snapshot = try await scan(output)
 
         XCTAssertEqual(snapshot.snapshot.listeners.count, 2)
-        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · web", "Docker · web"])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["web", "web"])
+        XCTAssertTrue(snapshot.snapshot.listeners.allSatisfy {
+            if case .dockerContainer(containerID: nil) = $0.source { return $0.controlTarget == .none }
+            return false
+        })
     }
 
     func testDockerMixedUsableAndMissingIDsRemainAtSocketGranularity() async throws {
@@ -229,9 +238,9 @@ final class RemotePortScannerTests: XCTestCase {
         tcp LISTEN 0 128 [::]:8080 [::]:* ino:2 sk:two
         tcp LISTEN 0 128 0.0.0.0:9090 0.0.0.0:* ino:3 sk:three
         __PORTO_DOCKER__
-        known-id\tweb\t8080->8080/tcp
+        aaaaaaaaaaaa\tweb\t8080->8080/tcp
         \tweb\t8080->8080/tcp
-        known-id\tweb\t9090->9090/tcp
+        aaaaaaaaaaaa\tweb\t9090->9090/tcp
         """
 
         let snapshot = try await scan(output)
@@ -257,7 +266,7 @@ final class RemotePortScannerTests: XCTestCase {
         let outcome = await scanner.scan(request)
 
         guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
-        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["Docker · web", "other"])
+        XCTAssertEqual(snapshot.snapshot.listeners.map(\.processName), ["web", "other"])
         XCTAssertEqual(snapshot.snapshot.connections.map(\.processName), ["client"])
     }
 
@@ -363,6 +372,15 @@ final class DockerPortParserTests: XCTestCase {
         XCTAssertFalse(catalog.contains(localPort: 8080, transport: .tcp))
         XCTAssertFalse(catalog.contains(localPort: 8081, transport: .tcp))
         XCTAssertTrue(catalog.contains(localPort: 8082, transport: .tcp))
+    }
+
+    func testContainerIDsAcceptOnlyLowercaseHexDockerLengths() {
+        XCTAssertEqual(DockerContainerID.validated("0123456789ab"), "0123456789ab")
+        XCTAssertEqual(DockerContainerID.validated(String(repeating: "a", count: 64))?.count, 64)
+        XCTAssertNil(DockerContainerID.validated("short"))
+        XCTAssertNil(DockerContainerID.validated("0123456789AB"))
+        XCTAssertNil(DockerContainerID.validated("0123456789ab!"))
+        XCTAssertNil(DockerContainerID.validated(String(repeating: "a", count: 65)))
     }
 }
 

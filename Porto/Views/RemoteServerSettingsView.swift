@@ -9,6 +9,9 @@ struct RemoteServerSettingsView: View {
     @State private var openManualEditorAfterPickerDismiss = false
     @State private var editorProfile: RemoteServerProfile?
     @State private var profileToDelete: RemoteServerProfile?
+    @State private var testingProfileID: UUID?
+    @State private var capabilityMessages: [UUID: String] = [:]
+    @State private var profileTestTask: Task<Void, Never>?
 
     init(monitor: PortMonitor, discovery: any SSHHostCandidateDiscovering = LocalSSHHostCandidateDiscovery()) {
         self.monitor = monitor
@@ -60,6 +63,10 @@ struct RemoteServerSettingsView: View {
             monitor.refreshProfiles()
             SettingsWindowPresenter.bringToFront()
         }
+        .onDisappear {
+            profileTestTask?.cancel()
+            profileTestTask = nil
+        }
         .sheet(isPresented: $showingPicker, onDismiss: openManualEditorIfRequested) {
             SSHConnectionPicker(monitor: monitor, discovery: discovery) {
                 openManualEditorAfterPickerDismiss = true
@@ -101,31 +108,57 @@ struct RemoteServerSettingsView: View {
 
     private func profileRow(_ profile: RemoteServerProfile) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: profile.isEnabled ? "checkmark.circle.fill" : "pause.circle")
-                .foregroundStyle(profile.isEnabled ? .green : .secondary)
+            Image(systemName: "server.rack")
+                .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
                 Text(profile.displayName).font(.body.weight(.medium))
-                Text("\(profile.username)@\(profile.host):\(profile.port)")
-                    .font(.callout.monospaced())
-                    .foregroundStyle(.secondary)
-                Text(profile.identityFilePath == nil ? "No private key selected" : "Private key selected")
-                    .font(.caption).foregroundStyle(.tertiary)
             }
             Spacer()
-            Toggle("Enabled", isOn: enabledBinding(for: profile))
-                .toggleStyle(.switch)
-                .labelsHidden()
-                .help(profile.isEnabled ? "Disable \(profile.displayName)" : "Enable \(profile.displayName)")
-            Button("Edit") { editorProfile = profile }
-                .buttonStyle(.borderless)
-            Button("Delete", systemImage: "trash") { profileToDelete = profile }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.red)
-                .accessibilityLabel("Delete \(profile.displayName)")
-                .help("Delete \(profile.displayName)")
+            VStack(alignment: .trailing, spacing: 5) {
+                HStack(spacing: 8) {
+                    Toggle(isOn: enabledBinding(for: profile)) {
+                        EmptyView()
+                    }
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(testingProfileID == profile.id)
+                        .accessibilityLabel("\(profile.isEnabled ? "Disable" : "Enable") \(profile.displayName)")
+
+                    Button {
+                        testConnection(profile)
+                    } label: {
+                        if testingProfileID == profile.id {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Test Connection")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(testingProfileID != nil || !profile.isEnabled)
+                    .accessibilityLabel("Test connection to \(profile.displayName)")
+                    .help(profile.isEnabled ? "Test the SSH connection and port inspection capability" : "Enable this profile before testing")
+
+                    Menu {
+                        Button("Edit") { editorProfile = profile }
+                        Divider()
+                        Button("Delete", role: .destructive) { profileToDelete = profile }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .frame(width: 44, height: 44)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .accessibilityLabel("Actions for \(profile.displayName)")
+                    .help("Edit or delete \(profile.displayName)")
+                }
+                if let message = capabilityMessages[profile.id] {
+                    connectionTestIndicator(message)
+                }
+            }
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(profileSummary(profile))
     }
@@ -133,17 +166,50 @@ struct RemoteServerSettingsView: View {
     private func enabledBinding(for profile: RemoteServerProfile) -> Binding<Bool> {
         Binding(
             get: { profile.isEnabled },
-            set: { enabled in
-                do { try monitor.setProfileEnabled(id: profile.id, enabled: enabled) }
-                catch { /* Store validation is unchanged by this toggle. */ }
-            }
+            set: { setEnabled(profile, enabled: $0) }
         )
+    }
+
+    private func setEnabled(_ profile: RemoteServerProfile, enabled: Bool) {
+        do { try monitor.setProfileEnabled(id: profile.id, enabled: enabled) }
+        catch { capabilityMessages[profile.id] = "The profile could not be updated." }
+    }
+
+    private func testConnection(_ profile: RemoteServerProfile) {
+        capabilityMessages[profile.id] = nil
+        testingProfileID = profile.id
+        profileTestTask?.cancel()
+        profileTestTask = Task { @MainActor in
+            let result = await monitor.testConnection(for: profile)
+            guard !Task.isCancelled else { return }
+            testingProfileID = nil
+            profileTestTask = nil
+            switch result {
+            case .success:
+                capabilityMessages[profile.id] = "Connection verified · port inspection available"
+            case .refusedDisabled:
+                capabilityMessages[profile.id] = "Enable this profile to test its connection."
+            case .failed(let failure):
+                capabilityMessages[profile.id] = failure.userMessage.isEmpty ? "Connection test was cancelled." : failure.userMessage
+            }
+        }
+    }
+
+    private func connectionTestIndicator(_ message: String) -> some View {
+        let succeeded = message.hasPrefix("Connection verified")
+        return Image(systemName: succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+            .foregroundStyle(succeeded ? Color.green : Color.orange)
+            .accessibilityLabel(message)
+            .help(message)
     }
 
     private func profileSummary(_ profile: RemoteServerProfile) -> String {
         let state = profile.isEnabled ? "enabled" : "disabled"
-        let key = profile.identityFilePath == nil ? "no private key" : "private key selected"
-        return "\(profile.displayName), \(profile.username) at \(profile.host), port \(profile.port), \(key), \(state)"
+        let key = profile.identityFilePath == nil ? nil : "private key selected"
+        let details = [profile.sshAddress, "port \(profile.port)", key, state]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+        return "\(profile.displayName), \(details)"
     }
 }
 
@@ -322,10 +388,12 @@ private struct RemoteServerProfileEditor: View {
     @State private var testMessage: String?
     @State private var isTesting = false
     @State private var testTask: Task<Void, Never>?
+    @State private var hostnameEntry: String
 
     init(monitor: PortMonitor, profile: RemoteServerProfile, onDone: @escaping () -> Void) {
         self.monitor = monitor
         _draft = State(initialValue: profile)
+        _hostnameEntry = State(initialValue: profile.sshAddress)
         isNew = profile.displayName.isEmpty && profile.host.isEmpty && profile.username.isEmpty
         self.onDone = onDone
     }
@@ -335,29 +403,24 @@ private struct RemoteServerProfileEditor: View {
             Text(isNew ? "Add SSH Connection" : "Edit SSH Connection")
                 .font(.title2.weight(.semibold))
             Form {
-                TextField("ID / Display name", text: $draft.displayName)
-                TextField("Host", text: $draft.host)
-                TextField("Username", text: $draft.username)
-                HStack {
-                    TextField("Port", value: $draft.port, format: .number)
-                        .frame(width: 100)
-                    Spacer()
-                    Toggle("Enabled", isOn: $draft.isEnabled)
-                }
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(draft.identityFilePath ?? "No private key selected")
-                            .lineLimit(1).truncationMode(.middle)
-                            .foregroundStyle(draft.identityFilePath == nil ? .secondary : .primary)
-                        Text("Only the file path is stored; the key is never read or copied.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Choose…") { showingImporter = true }
-                    if draft.identityFilePath != nil {
-                        Button("Clear") { draft.identityFilePath = nil }
+                TextField("Display name", text: $draft.displayName)
+                TextField("Hostname", text: $hostnameEntry, prompt: Text("user@hostname"))
+                    .help("Enter a username and host, for example dei@192.168.2.28")
+                TextField("Port", value: $draft.port, format: .number)
+                LabeledContent("File path") {
+                    HStack {
+                        TextField("", text: identityFilePathBinding)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button("Choose…") { showingImporter = true }
+                        if draft.identityFilePath != nil {
+                            Button("Clear") { draft.identityFilePath = nil }
+                        }
                     }
                 }
+                Button("Test Connection") { testConnection() }
+                    .disabled(!draft.isEnabled || isTesting)
             }
             .disabled(isTesting)
             if let validationMessage {
@@ -365,14 +428,13 @@ private struct RemoteServerProfileEditor: View {
                     .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
             }
             if let testMessage {
-                Label(testMessage, systemImage: testMessage == "Connection succeeded." ? "checkmark.circle" : "exclamationmark.triangle")
-                    .foregroundStyle(testMessage == "Connection succeeded." ? .green : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                let succeeded = testMessage.hasPrefix("Connection verified")
+                Image(systemName: succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(succeeded ? Color.green : Color.orange)
+                    .accessibilityLabel(testMessage)
+                    .help(testMessage)
             }
             HStack {
-                Button("Test Connection") { testConnection() }
-                    .disabled(!draft.isEnabled || isTesting)
-                if isTesting { ProgressView().controlSize(.small) }
                 Spacer()
                 Button("Cancel") { close() }
                 Button(isNew ? "Add" : "Save") { save() }
@@ -399,8 +461,12 @@ private struct RemoteServerProfileEditor: View {
     }
 
     private func save() {
+        guard let profile = profileUsingHostnameEntry() else {
+            validationMessage = "Enter a hostname in the form user@host, for example dei@192.168.2.28."
+            return
+        }
         do {
-            try monitor.saveProfile(draft)
+            try monitor.saveProfile(profile)
             close()
         } catch let error as RemoteServerProfileValidationError {
             validationMessage = error.userMessage
@@ -410,20 +476,39 @@ private struct RemoteServerProfileEditor: View {
     }
 
     private func testConnection() {
+        guard let profile = profileUsingHostnameEntry() else {
+            validationMessage = "Enter a hostname in the form user@host, for example dei@192.168.2.28."
+            return
+        }
+        validationMessage = nil
         testMessage = nil
         isTesting = true
-        let profile = draft
         testTask = Task { @MainActor in
             let result = await monitor.testConnection(for: profile)
             guard !Task.isCancelled else { return }
             isTesting = false
             testTask = nil
             switch result {
-            case .success: testMessage = "Connection succeeded."
+            case .success: testMessage = "Connection verified · port inspection available"
             case .refusedDisabled: testMessage = "Enable this profile to test its connection."
             case .failed(let failure): testMessage = failure.userMessage.isEmpty ? "Connection test was cancelled." : failure.userMessage
             }
         }
+    }
+
+    private func profileUsingHostnameEntry() -> RemoteServerProfile? {
+        guard let address = RemoteServerProfile.parseSSHAddress(hostnameEntry) else { return nil }
+        var profile = draft
+        profile.username = address.username
+        profile.host = address.host
+        return profile
+    }
+
+    private var identityFilePathBinding: Binding<String> {
+        Binding(
+            get: { draft.identityFilePath ?? "" },
+            set: { draft.identityFilePath = $0.isEmpty ? nil : $0 }
+        )
     }
 
     private func close() {

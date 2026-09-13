@@ -28,6 +28,31 @@ struct RemoteServerProfile: Identifiable, Codable, Hashable, Sendable {
         self.isEnabled = isEnabled
     }
 
+    /// The user-facing SSH address. IPv6 hosts are bracketed so the port
+    /// separator remains unambiguous in Settings and the target picker.
+    var sshAddress: String {
+        guard !username.isEmpty || !host.isEmpty else { return "" }
+        let displayHost = host.contains(":") && !host.hasPrefix("[")
+            ? "[\(host)]"
+            : host
+        return "\(username)@\(displayHost)"
+    }
+
+    /// Parses the single user@hostname value used by the profile editor.
+    /// The stored profile continues to keep the two components separate for
+    /// the fixed SSH command contract and existing persisted profiles.
+    static func parseSSHAddress(_ value: String) -> (username: String, host: String)? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let separator = trimmed.firstIndex(of: "@") else { return nil }
+        let hostStart = trimmed.index(after: separator)
+        guard separator > trimmed.startIndex, hostStart < trimmed.endIndex else { return nil }
+
+        let username = String(trimmed[..<separator])
+        let host = String(trimmed[hostStart...])
+        guard isValidUsername(username), isValidHost(host) else { return nil }
+        return (username, host)
+    }
+
     static func validate(
         _ profile: RemoteServerProfile,
         against otherProfiles: some Sequence<RemoteServerProfile> = []

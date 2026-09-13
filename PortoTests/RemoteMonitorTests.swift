@@ -446,6 +446,69 @@ final class RemoteMonitorTests: XCTestCase {
         XCTAssertNil(monitor.activeRemoteTerminationKey)
     }
 
+    func testRemoteTerminationStateIsSharedAcrossRowsWithTheSameProcessOwner() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let first = makeRemoteRow(profile: profile, name: "owned", port: 8200, pid: 77)
+        let second = makeRemoteRow(profile: profile, name: "owned", port: 8201, pid: 77)
+        let sharedSnapshot = PortSnapshot(listeners: [first, second], connections: [])
+        let remote = MonitorTestScanner(plans: [.success(sharedSnapshot), .success(sharedSnapshot)])
+        let terminator = RecordingTerminator(outcome: .forceKillAvailable)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        monitor.requestStop(for: first)
+
+        await waitUntil { await terminator.stopCount() == 1 }
+        XCTAssertEqual(monitor.terminationState(for: first), .forceKillAvailable)
+        XCTAssertEqual(monitor.terminationState(for: second), .forceKillAvailable)
+    }
+
+    func testPIDLessDockerRowsAreActionableAndAllOwnerRowsDisappearOnExit() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let targetID = PortTargetID.remote(profileID: profile.id)
+        let containerID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        let first = PortProcess(
+            id: "docker-first", origin: .remote(targetID: targetID, pid: nil), localPort: 8200,
+            transport: .tcp, processName: "web", endpoints: [], activityKind: .listener,
+            source: .dockerContainer(containerID: containerID),
+            controlTarget: .remoteDocker(targetID: targetID, containerID: containerID), isDockerPublished: true
+        )
+        let second = PortProcess(
+            id: "docker-second", origin: .remote(targetID: targetID, pid: nil), localPort: 8201,
+            transport: .tcp, processName: "web", endpoints: [], activityKind: .connection,
+            source: .dockerContainer(containerID: containerID),
+            controlTarget: .remoteDocker(targetID: targetID, containerID: containerID), isDockerPublished: true
+        )
+        let remote = MonitorTestScanner(plans: [
+            .success(PortSnapshot(listeners: [first], connections: [second])),
+            .success(.empty)
+        ])
+        let terminator = RecordingTerminator(outcome: .exited)
+        let monitor = makeMonitor(store: store, local: MonitorTestScanner(plans: [.success(.empty)]), remote: remote,
+                                   remoteTerminator: terminator)
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await remote.count() == 0 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 && !monitor.isScanning }
+        XCTAssertFalse(monitor.isTerminationDisabled(for: first))
+        monitor.requestStop(for: first)
+
+        await waitUntil { await remote.count() == 2 && monitor.listenerRows.isEmpty && monitor.connectionRows.isEmpty }
+        let stopCount = await terminator.stopCount()
+        XCTAssertEqual(stopCount, 1)
+    }
+
     func testStableDockerRowIDDoesNotRetainForceKillForReplacementIdentity() async throws {
         let profile = profile(name: "Production", enabled: true)
         let store = InMemoryRemoteServerProfileStore()

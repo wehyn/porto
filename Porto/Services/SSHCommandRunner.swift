@@ -26,6 +26,7 @@ enum RemoteSSHSignal: Int32, Sendable, Equatable { case term = 15; case kill = 9
 enum RemoteSSHOperation: Sendable, Equatable {
     case scan
     case signal(RemoteSSHSignal, pid: Int32)
+    case signalContainer(RemoteSSHSignal, containerID: String)
 }
 
 struct SSHCommandExecutionResult: Sendable, Equatable {
@@ -93,6 +94,10 @@ actor SSHCommandRunner: SSHCommandRunning {
             guard pid > 0 else { return nil }
             let name = signal == .term ? "TERM" : "KILL"
             arguments.append("/bin/kill -\(name) -- \(pid)")
+        case let .signalContainer(signal, containerID):
+            guard let containerID = DockerContainerID.validated(containerID) else { return nil }
+            let name = signal == .term ? "TERM" : "KILL"
+            arguments.append("docker kill --signal \(name) -- \(containerID)")
         }
         return arguments
     }

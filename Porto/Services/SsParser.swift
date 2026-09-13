@@ -78,6 +78,10 @@ struct SsParser: Sendable {
                 "remote", "target=\(targetComponent)", key.activityKind.rawValue,
                 key.transport.rawValue, "port=\(key.localPort)", identity
             ].joined(separator: "|")
+            let source: PortProcessSource = value.pid == nil ? .unknown : .remoteProcess
+            let controlTarget: PortControlTarget = value.pid.map {
+                .remoteProcess(targetID: targetID, pid: $0)
+            } ?? .none
             return PortProcess(
                 id: id,
                 origin: .remote(targetID: targetID, pid: value.pid),
@@ -86,7 +90,9 @@ struct SsParser: Sendable {
                 processName: value.processName,
                 endpoints: value.endpoints.sorted(by: ssEndpointSort),
                 activityKind: key.activityKind,
-                remoteSocketIdentity: socketIdentity
+                remoteSocketIdentity: socketIdentity,
+                source: source,
+                controlTarget: controlTarget
             )
         }
         let listeners = PortProcessSort.sort(rows.filter { $0.activityKind == .listener })

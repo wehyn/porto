@@ -211,6 +211,7 @@ actor PortScanner: PortScanning {
 
         let rows = groups.map { group in
             let identity = identities[group.key.pid]
+            let processName = group.processName.isEmpty ? "Unknown process" : group.processName
             return PortProcess(
                 id: PortProcess.makeID(
                     activityKind: group.key.activityKind,
@@ -224,9 +225,11 @@ actor PortScanner: PortScanning {
                     ?? .localUnverified(pid: group.key.pid),
                 localPort: group.key.localPort,
                 transport: group.key.transport,
-                processName: group.processName.isEmpty ? "Unknown process" : group.processName,
+                processName: processName,
                 endpoints: group.endpoints,
-                activityKind: group.key.activityKind
+                activityKind: group.key.activityKind,
+                source: Self.dockerHostProcessNames.contains(processName.lowercased())
+                    ? .dockerHostProcess : .localApplication
             )
         }
 
@@ -235,6 +238,10 @@ actor PortScanner: PortScanning {
             connections: PortProcessSort.sort(rows.filter { $0.activityKind == .connection })
         )
     }
+
+    private static let dockerHostProcessNames: Set<String> = [
+        "docker", "dockerd", "com.docker.backend", "orbstack", "orb"
+    ]
 
     private func processIsGone(_ pid: Int32) -> Bool {
         inspector.identity(for: pid) == nil

@@ -51,7 +51,21 @@ struct PortVisibilityPolicy: Sendable, Equatable {
     }
 
     func includes(_ row: PortProcess) -> Bool {
-        includes(port: row.localPort, processName: row.processName)
+        let normalizedName = Self.normalized(row.processName)
+        let isDockerRow: Bool
+        if row.isDockerPublished {
+            isDockerRow = true
+        } else if case .dockerContainer = row.source {
+            isDockerRow = true
+        } else {
+            isDockerRow = false
+        }
+        // Docker metadata is an explicit source classification. Preserve all
+        // published rows, including a container whose display name happens to
+        // match a local noise filter.
+        if isDockerRow { return true }
+        return !hiddenPorts.contains(row.localPort)
+            && !hiddenProcessNames.contains(normalizedName)
     }
 
     func filtering(_ snapshot: PortSnapshot) -> PortSnapshot {

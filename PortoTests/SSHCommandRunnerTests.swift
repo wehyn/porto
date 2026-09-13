@@ -174,6 +174,29 @@ final class SSHCommandRunnerTests: XCTestCase {
         XCTAssertFalse(arguments?.contains { $0.contains("PRIVATE") || $0.contains("BEGIN") } ?? true)
     }
 
+    func testSignalCommandsAreExactAndContainerIDsAreValidated() throws {
+        let targetProfile = profile()
+        XCTAssertEqual(
+            SSHCommandRunner.arguments(for: targetProfile, operation: .signal(.term, pid: 42))?.last,
+            "/bin/kill -TERM -- 42"
+        )
+        XCTAssertEqual(
+            SSHCommandRunner.arguments(for: targetProfile, operation: .signal(.kill, pid: 42))?.last,
+            "/bin/kill -KILL -- 42"
+        )
+        let id = "0123456789abcdef"
+        XCTAssertEqual(
+            SSHCommandRunner.arguments(for: targetProfile, operation: .signalContainer(.term, containerID: id))?.last,
+            "docker kill --signal TERM -- \(id)"
+        )
+        XCTAssertEqual(
+            SSHCommandRunner.arguments(for: targetProfile, operation: .signalContainer(.kill, containerID: id))?.last,
+            "docker kill --signal KILL -- \(id)"
+        )
+        XCTAssertNil(SSHCommandRunner.arguments(for: targetProfile, operation: .signalContainer(.term, containerID: "0123456789AB")))
+        XCTAssertNil(SSHCommandRunner.arguments(for: targetProfile, operation: .signalContainer(.term, containerID: "short")))
+    }
+
     private func expectedArguments(profile: RemoteServerProfile, hostArgument: String? = nil) -> [String] {
         var arguments = [
             "-T",

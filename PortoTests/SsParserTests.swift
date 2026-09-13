@@ -98,6 +98,8 @@ final class SsParserTests: XCTestCase {
         let original = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3)) ino:10 sk:first\n".utf8), targetID: target).snapshot.listeners[0]
         let replacement = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3)) ino:11 sk:second\n".utf8), targetID: target).snapshot.listeners[0]
 
+        XCTAssertEqual(original.source, .remoteProcess)
+        XCTAssertEqual(original.controlTarget, .remoteProcess(targetID: target, pid: 50))
         XCTAssertEqual(original.remoteSocketIdentity, "sk:first")
         XCTAssertNotEqual(original.id, replacement.id)
         XCTAssertNotEqual(original.remoteSocketIdentity, replacement.remoteSocketIdentity)
@@ -106,6 +108,8 @@ final class SsParserTests: XCTestCase {
     func testOwnerRowsWithoutSocketIdentityAreMarkedUnverified() throws {
         let row = try parse(Data("tcp LISTEN 0 128 *:8080 *:* users:((\"web\",pid=50,fd=3))\n".utf8)).snapshot.listeners[0]
 
+        XCTAssertEqual(row.source, .remoteProcess)
+        XCTAssertEqual(row.controlTarget, .remoteProcess(targetID: targetA, pid: 50))
         XCTAssertNil(row.remoteSocketIdentity)
     }
 
