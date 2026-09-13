@@ -53,6 +53,19 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(snapshot.diagnostics.validRecords, 6)
     }
 
+    func testRevalidationSnapshotRetainsOwnerlessRowsHiddenFromTheUI() async throws {
+        let output = "tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* ino:7 sk:cookie\n"
+        let runner = StubSSHCommandRunner(result: execution(stdout: Data(output.utf8), status: 0))
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+        let request = PortScanRequest(targetID: targetID, sessionGeneration: 2, scanGeneration: 1, trigger: .manual)
+
+        let outcome = await scanner.scan(request)
+
+        guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
+        XCTAssertTrue(snapshot.snapshot.listeners.isEmpty)
+        XCTAssertEqual(snapshot.revalidationSnapshot?.listeners.map(\.localPort), [8080])
+    }
+
     func testDockerPublishedPortReplacesUnknownProcessBeforeFiltering() async throws {
         let output = """
         tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* ino:22

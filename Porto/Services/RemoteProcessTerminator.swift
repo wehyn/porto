@@ -104,10 +104,34 @@ actor RemoteProcessTerminator: ProcessTerminating {
             if case let .remote(remoteFailure) = error { return .failed(map(remoteFailure)) }
             return .failed(.revalidationFailed)
         case .success(let targeted):
-            guard let current = targeted.snapshot.allRows.first(where: { $0.id == row.id }) else {
+            let revalidationSnapshot = targeted.revalidationSnapshot ?? targeted.snapshot
+            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+                if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
+                    return .failed(.revalidationFailed)
+                }
                 return .failed(.staleTarget)
             }
             return equivalent(current, row) ? .matched : .failed(.staleTarget)
+        }
+    }
+
+    private func dockerHostEvidenceIsPresent(for row: PortProcess, in snapshot: PortSnapshot) -> Bool {
+        let originalSocketIdentities = Set((row.remoteSocketIdentity ?? "").split(separator: ",").map(String.init))
+        return snapshot.listeners.contains { candidate in
+            guard candidate.activityKind == .listener,
+                  candidate.localPorts.contains(where: row.localPorts.contains),
+                  candidate.transports.contains(where: row.transports.contains) else {
+                return false
+            }
+
+            let candidateSocketIdentities = Set((candidate.remoteSocketIdentity ?? "").split(separator: ",").map(String.init))
+            if !originalSocketIdentities.isEmpty {
+                if !candidateSocketIdentities.isEmpty {
+                    return !candidateSocketIdentities.isDisjoint(with: originalSocketIdentities)
+                }
+                return !Set(candidate.endpoints).isDisjoint(with: Set(row.endpoints))
+            }
+            return !Set(candidate.endpoints).isDisjoint(with: Set(row.endpoints))
         }
     }
 
@@ -190,6 +214,7 @@ actor RemoteProcessTerminator: ProcessTerminating {
             guard !Task.isCancelled else { return .cancelled }
             switch await snapshotContains(row, before: deadline) {
             case .exited: return .exited
+            case .forceKillAvailable: return .forceKillAvailable
             case .failed: return .failed(.revalidationFailed)
             case .present: continue
             case .timedOut: break
@@ -200,7 +225,7 @@ actor RemoteProcessTerminator: ProcessTerminating {
         return forceKill ? .failed(.stillAlive) : .forceKillAvailable
     }
 
-    private enum Presence { case present, exited, failed, timedOut, cancelled }
+    private enum Presence { case present, exited, forceKillAvailable, failed, timedOut, cancelled }
     private func snapshotContains(_ row: PortProcess, before deadline: ContinuousClock.Instant) async -> Presence {
         let remaining = deadline - now()
         guard remaining > .zero else { return .timedOut }
@@ -233,7 +258,13 @@ actor RemoteProcessTerminator: ProcessTerminating {
         })
         switch outcome {
         case .success(let snapshot):
-            guard let current = snapshot.snapshot.allRows.first(where: { $0.id == row.id }) else { return .exited }
+            let revalidationSnapshot = snapshot.revalidationSnapshot ?? snapshot.snapshot
+            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+                if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
+                    return .forceKillAvailable
+                }
+                return .exited
+            }
             return equivalent(current, row) ? .present : .failed
         case .failure: return .failed
         case .cancelled: return .cancelled
