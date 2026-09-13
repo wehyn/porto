@@ -191,20 +191,55 @@ final class PortMonitor: ObservableObject {
 
     func testConnection(for profile: RemoteServerProfile) async -> RemoteConnectionTestResult {
         guard profile.isEnabled else { return .refusedDisabled }
-        let requiresSavedAuthorization = profileStore?.profiles.contains(where: { $0.id == profile.id }) ?? false
-        while !canStartConnectionTest(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) {
-            guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) else {
+        return await testConnection(for: profile, requiresSavedAuthorization: profileStore != nil)
+    }
+
+    /// Tests an editor draft without saving it or treating it as a selected
+    /// profile. Unlike the menu/settings-row API, a draft may be disabled
+    /// because the editor's Test Connection action is an explicit capability
+    /// check rather than an enablement change.
+    func testDraftConnection(for profile: RemoteServerProfile) async -> RemoteConnectionTestResult {
+        await testConnection(for: profile, requiresSavedAuthorization: false, allowDisabled: true)
+    }
+
+    private func testConnection(
+        for profile: RemoteServerProfile,
+        requiresSavedAuthorization: Bool,
+        allowDisabled: Bool = false
+    ) async -> RemoteConnectionTestResult {
+        while !canStartConnectionTest(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ) {
+            guard profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            ) else {
                 return .refusedDisabled
             }
             do {
                 try await Task.sleep(for: .milliseconds(10))
             } catch {
-                return profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+                return profileAuthorization(
+                    for: profile,
+                    requiresSavedAuthorization: requiresSavedAuthorization,
+                    allowDisabled: allowDisabled
+                )
                     ? .failed(.cancelled) : .refusedDisabled
             }
         }
-        guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization), !Task.isCancelled else {
-            return profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+        guard profileAuthorization(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ), !Task.isCancelled else {
+            return profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            )
                 ? .failed(.cancelled) : .refusedDisabled
         }
 
@@ -226,7 +261,11 @@ final class PortMonitor: ObservableObject {
         } onCancel: {
             Task { await scanner.cancelActiveWork() }
         }
-        guard profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization) else {
+        guard profileAuthorization(
+            for: profile,
+            requiresSavedAuthorization: requiresSavedAuthorization,
+            allowDisabled: allowDisabled
+        ) else {
             return .refusedDisabled
         }
         if Task.isCancelled { return .failed(.cancelled) }
@@ -241,14 +280,19 @@ final class PortMonitor: ObservableObject {
 
     private func canStartConnectionTest(
         for profile: RemoteServerProfile,
-        requiresSavedAuthorization: Bool
+        requiresSavedAuthorization: Bool,
+        allowDisabled: Bool = false
     ) -> Bool {
         !connectionTestActive
             && scanToken == nil
             && activeTerminationIdentity == nil
             && activeRemoteTerminationKey == nil
             && forceKillPrompt == nil
-            && profileAuthorization(for: profile, requiresSavedAuthorization: requiresSavedAuthorization)
+            && profileAuthorization(
+                for: profile,
+                requiresSavedAuthorization: requiresSavedAuthorization,
+                allowDisabled: allowDisabled
+            )
     }
 
     private func cancelActiveConnectionTest() {
@@ -258,14 +302,15 @@ final class PortMonitor: ObservableObject {
 
     private func profileAuthorization(
         for profile: RemoteServerProfile,
-        requiresSavedAuthorization: Bool = false
+        requiresSavedAuthorization: Bool = false,
+        allowDisabled: Bool = false
     ) -> Bool {
-        guard profile.isEnabled else { return false }
+        guard allowDisabled || profile.isEnabled else { return false }
         guard let profileStore else { return true }
         guard let saved = profileStore.profiles.first(where: { $0.id == profile.id }) else {
             return !requiresSavedAuthorization
         }
-        return saved.isEnabled
+        return allowDisabled || saved.isEnabled
     }
 
     private func switchTarget(_ target: PortTarget, bypassPicker: Bool = false) {
@@ -449,8 +494,22 @@ final class PortMonitor: ObservableObject {
     }
 
     private func finishRemoteTermination(_ outcome: TerminationOutcome, key: String, token: UUID, targetID: PortTargetID? = nil) {
-        guard terminationToken == token, activeRemoteTerminationKey == key,
-              targetID == nil || targetID == selectedTarget.id else { return }
+        guard terminationToken == token, activeRemoteTerminationKey == key else { return }
+        // Cancellation is authoritative even after the target or popover has
+        // changed. The canceled task must release the barrier it established;
+        // otherwise a later session can remain permanently blocked. Results
+        // that are not canceled still require the original target below.
+        if case .cancelled = outcome {
+            clearRemoteTerminationBarrier(forKey: key)
+            return
+        }
+        guard targetID == nil || targetID == selectedTarget.id else {
+            // A cancellation can race with the final non-cancelled outcome.
+            // The token/key still prove that this completion owns the barrier,
+            // but the captured target makes its result stale.
+            clearRemoteTerminationBarrier(forKey: key)
+            return
+        }
         terminationTask = nil; terminationToken = nil; activeRemoteTerminationKey = nil
         switch outcome {
         case .exited:
@@ -463,8 +522,16 @@ final class PortMonitor: ObservableObject {
         case let .failed(error):
             if let row = remoteTerminationRows[key] { setRemoteTerminationState(.failed(error), for: row, key: key) }
             if isPresented { pendingRefresh = true }
-        case .cancelled: removeRemoteTerminationState(forKey: key)
+        case .cancelled: break
         }
+        drainPendingRefreshIfPossible()
+    }
+
+    private func clearRemoteTerminationBarrier(forKey key: String) {
+        terminationTask = nil
+        terminationToken = nil
+        activeRemoteTerminationKey = nil
+        removeRemoteTerminationState(forKey: key)
         drainPendingRefreshIfPossible()
     }
 
@@ -735,15 +802,44 @@ final class PortMonitor: ObservableObject {
     }
 
     private func removeRemoteRows(for owner: PortProcess, targetID: PortTargetID) {
-        guard let key = remoteTerminationKey(for: owner) else { return }
-        listenerRows.removeAll { remoteTerminationKey(for: $0) == key }
-        connectionRows.removeAll { remoteTerminationKey(for: $0) == key }
+        guard owner.isRemote else { return }
+        let belongsToOwner: (PortProcess) -> Bool = { [self] row in
+            remoteTerminationOwnerMatches(row, owner: owner, targetID: targetID)
+        }
+        listenerRows.removeAll(where: belongsToOwner)
+        connectionRows.removeAll(where: belongsToOwner)
         guard var state = targetStates[targetID], let snapshot = state.snapshot else { return }
         state.snapshot = PortSnapshot(
-            listeners: snapshot.listeners.filter { remoteTerminationKey(for: $0) != key },
-            connections: snapshot.connections.filter { remoteTerminationKey(for: $0) != key }
+            listeners: snapshot.listeners.filter { !belongsToOwner($0) },
+            connections: snapshot.connections.filter { !belongsToOwner($0) }
         )
         targetStates[targetID] = state
+    }
+
+    private func remoteTerminationOwnerMatches(_ row: PortProcess, owner: PortProcess, targetID: PortTargetID) -> Bool {
+        guard row.isRemote,
+              case let .remote(rowTargetID, rowPID) = row.origin,
+              rowTargetID == targetID else { return false }
+        switch owner.controlTarget {
+        case let .remoteProcess(ownerTargetID, ownerPID):
+            guard ownerTargetID == targetID, let ownerPID, ownerPID > 0,
+                  let rowPID, rowPID > 0, rowPID == ownerPID else { return false }
+            guard case let .remoteProcess(rowControlTargetID, rowControlPID) = row.controlTarget else { return false }
+            return rowControlTargetID == targetID && rowControlPID == ownerPID
+        case let .remoteDocker(ownerTargetID, ownerContainerID):
+            guard ownerTargetID == targetID,
+                  let ownerContainerID = DockerContainerID.validated(ownerContainerID),
+                  case let .dockerContainer(rowContainerIDRaw) = row.source else { return false }
+            guard let rowContainerIDRaw,
+                  let rowContainerID = DockerContainerID.validated(rowContainerIDRaw),
+                  rowContainerID == ownerContainerID else { return false }
+            guard case let .remoteDocker(rowControlTargetID, rowControlContainerIDRaw) = row.controlTarget,
+                  rowControlTargetID == targetID else { return false }
+            guard let rowControlContainerID = DockerContainerID.validated(rowControlContainerIDRaw) else { return false }
+            return rowControlContainerID == ownerContainerID
+        default:
+            return false
+        }
     }
 
     /// The initiating row is compared completely so a replacement owner cannot
