@@ -81,11 +81,7 @@ struct PortPopoverView: View {
 
     private func openSettings() {
         openWindow(id: "settings")
-        Task { @MainActor in
-            await Task.yield()
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first(where: { $0.title == "Settings" })?.makeKeyAndOrderFront(nil)
-        }
+        SettingsWindowPresenter.bringToFront()
     }
 
     private var targetSelector: some View {

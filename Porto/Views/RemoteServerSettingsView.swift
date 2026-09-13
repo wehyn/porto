@@ -58,7 +58,7 @@ struct RemoteServerSettingsView: View {
         .frame(minWidth: 560, idealWidth: 620, minHeight: 380, idealHeight: 460)
         .onAppear {
             monitor.refreshProfiles()
-            bringSettingsToFront()
+            SettingsWindowPresenter.bringToFront()
         }
         .sheet(isPresented: $showingPicker, onDismiss: openManualEditorIfRequested) {
             SSHConnectionPicker(monitor: monitor, discovery: discovery) {
@@ -97,11 +97,6 @@ struct RemoteServerSettingsView: View {
         guard openManualEditorAfterPickerDismiss else { return }
         openManualEditorAfterPickerDismiss = false
         editorProfile = RemoteServerProfile(displayName: "", host: "", username: "")
-    }
-
-    private func bringSettingsToFront() {
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first(where: { $0.title == "Settings" })?.makeKeyAndOrderFront(nil)
     }
 
     private func profileRow(_ profile: RemoteServerProfile) -> some View {

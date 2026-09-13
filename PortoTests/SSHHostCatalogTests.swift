@@ -57,7 +57,7 @@ final class SSHHostCatalogTests: XCTestCase {
         Host alpha
             HostName should-not-win.example
             User bob
-        Host local-only
+        Host orb
             HostName %h
             User bad$user
             Port 0
@@ -76,7 +76,7 @@ final class SSHHostCatalogTests: XCTestCase {
 
         let result = SSHHostCatalog(homeDirectory: home, defaultUsername: "local-user").load()
 
-        XCTAssertEqual(result.candidates.map(\.alias), ["after-match", "alpha", "defaults", "local-only", "unsafe", "zeta"])
+        XCTAssertEqual(result.candidates.map(\.alias), ["after-match", "alpha", "defaults", "orb", "unsafe", "zeta"])
         let byAlias = Dictionary(uniqueKeysWithValues: result.candidates.map { ($0.alias, $0) })
         XCTAssertEqual(byAlias["alpha"]?.host, "host.example")
         XCTAssertEqual(byAlias["alpha"]?.username, "alice")
@@ -88,9 +88,9 @@ final class SSHHostCatalogTests: XCTestCase {
         XCTAssertEqual(byAlias["defaults"]?.host, "defaults")
         XCTAssertEqual(byAlias["defaults"]?.username, "local-user")
         XCTAssertEqual(byAlias["defaults"]?.port, 22)
-        XCTAssertEqual(byAlias["local-only"]?.host, "local-only")
-        XCTAssertEqual(byAlias["local-only"]?.username, "local-user")
-        XCTAssertNil(byAlias["local-only"]?.identityFilePath)
+        XCTAssertEqual(byAlias["orb"]?.host, "orb")
+        XCTAssertEqual(byAlias["orb"]?.username, "local-user")
+        XCTAssertNil(byAlias["orb"]?.identityFilePath)
         XCTAssertEqual(byAlias["unsafe"]?.host, "unsafe")
         XCTAssertEqual(byAlias["after-match"]?.username, "local-user")
         XCTAssertEqual(byAlias["alpha"]?.id, SSHHostCandidate(alias: "ALPHA", host: "x", username: "u").id)
