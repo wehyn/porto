@@ -2,7 +2,13 @@
 
 ## Project
 
-Porto is a lightweight macOS 26+ SwiftUI menu-bar utility for inspecting local network listeners and active connections, with user-triggered process termination.
+Porto is a lightweight macOS 26+ SwiftUI menu-bar utility for inspecting local
+network listeners and active connections, optionally inspecting one selected
+Linux profile over SSH, with user-triggered process termination.
+
+Use `docs/09-13-2026-porto-manual-remote-server-profiles-spec.md` as the source
+of truth for remote setup behavior; keep README.md user-facing and consistent
+with the checked-in implementation.
 
 ## Delegation
 
@@ -15,26 +21,30 @@ The main agent always owns planning, integration, and final verification across 
 ## Engineering workflow
 
 - Inspect the actual files, runtime, and acceptance surface before making conclusions or changes.
-- Preserve unrelated user work and generated files that are not part of the task.
+- Preserve unrelated tracked and untracked work; do not overwrite, reset, clean,
+  or remove it unless that action is explicitly in scope.
 - Use `apply_patch` for source and documentation edits.
 - Keep changes focused and reversible.
-- Validate the real macOS application after implementation; a build alone is not sufficient.
-- Add tests for parsers, concurrency, process termination, and failure paths before declaring the feature complete.
+- Run the canonical `./scripts/ci.sh` verification for implementation changes, plus focused checks for the changed subsystem.
+- For user-visible or runtime behavior changes, validate the real macOS application; a build alone is not sufficient. Do not require unrelated test categories when they are outside the changed subsystem.
 
 ## Porto-specific constraints
 
 - Target macOS 26+ with SwiftUI `MenuBarExtra` and an XcodeGen-generated Xcode project.
-- Keep the app menu-bar-only with no main window or Dock presence.
+- Keep the app menu-bar-only with no main window or Dock presence; a native secondary Settings window is permitted.
 - Show listeners by default; keep active connections in a collapsed section.
-- Use direct, machine-readable `/usr/sbin/lsof` output with `-nP`; do not invoke a shell or create one subprocess per row.
-- Keep at most one scan in flight, pause scanning while the menu is closed, and refresh every 2 seconds while it is visible.
+- For local scanning, invoke `/usr/sbin/lsof` directly with machine-readable `-nP` output; do not invoke a local shell or create one subprocess per row. Remote scanning may use only the reviewed, source-defined command over direct SSH, with no UI-provided interpolation.
+- Keep at most one scan in flight, pause normal scanning while the menu is
+  closed, and refresh every 2 seconds while it is visible.
 - Use SIGTERM for the `×` action first. Show a spinner while checking, then expose a separate Force Kill action only if the process remains alive; never send SIGKILL automatically.
-- Revalidate process identity before signaling to protect against stale rows and PID reuse.
+- Revalidate macOS `ProcessIdentity` and the targeted socket before signaling
+  local processes; immediately before remote signaling, validate the
+  target-scoped process/socket identity or container identity.
 - Do not add privileged helpers, launch daemons, or elevated scans in v1.
 - Keep visible row actions icon-only, while providing useful tooltips and accessibility labels.
 
 ## Git
 
 - Keep commits focused and describe the behavior they introduce.
-- Never commit `DerivedData`, build products, credentials, local machine state, or signing artifacts.
-- Inspect the diff and run relevant tests before pushing.
+- Never commit generated artifacts such as `DerivedData` or build products, credentials, local machine state, or signing artifacts.
+- Inspect the diff and run relevant tests before pushing; push only when explicitly requested.
