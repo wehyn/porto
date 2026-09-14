@@ -738,6 +738,34 @@ final class RemoteMonitorTests: XCTestCase {
         await waitUntil { await remote.cancellationCount() == 1 }
     }
 
+    func testReopeningDuringRemoteCancellationUsesPresentationFallback() async throws {
+        let profile = profile(name: "Production", enabled: true)
+        let store = InMemoryRemoteServerProfileStore()
+        try store.save(profile)
+        let local = MonitorTestScanner(plans: [.success(.empty), .success(.empty)])
+        let remote = ReopenDuringCancellationScanner(plans: [
+            .success(makeRemoteSnapshot(profile: profile, name: "server", port: 8080, pid: 55)),
+            .failure(.remote(.hostUnreachable))
+        ])
+        let monitor = makeMonitor(store: store, local: local, remote: remote)
+
+        monitor.setPresented(true)
+        await waitUntil { await local.count() == 1 && !monitor.isScanning }
+        monitor.selectTarget(.remote(profile))
+        await waitUntil { await remote.count() == 1 }
+
+        monitor.setPresented(false)
+        monitor.setPresented(true)
+        await remote.releaseFirstScan()
+
+        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
+        await waitUntil { await local.count() == 2 && !monitor.isScanning }
+        let triggers = await remote.triggers()
+        XCTAssertEqual(triggers, [.targetChange, .presentation])
+        XCTAssertEqual(monitor.selectedTarget, .local)
+        monitor.setPresented(false)
+    }
+
     private func makeMonitor(
         store: InMemoryRemoteServerProfileStore,
         local: any PortSnapshotScanning,
@@ -917,6 +945,62 @@ private actor CancellationRecordingScanner: PortSnapshotScanning {
 
     func started() -> Bool { didStart }
     func cancellationCount() -> Int { cancellations }
+}
+
+private actor ReopenDuringCancellationScanner: PortSnapshotScanning {
+    enum Plan: Sendable {
+        case success(PortSnapshot)
+        case failure(PortScanFailure)
+    }
+
+    private var plans: [Plan]
+    private var requests: [PortScanRequest] = []
+    private var firstScanOutcome: PortScanOutcome?
+    private var firstScanContinuation: CheckedContinuation<PortScanOutcome, Never>?
+
+    init(plans: [Plan]) { self.plans = plans }
+
+    func scan(_ request: PortScanRequest) async -> PortScanOutcome {
+        requests.append(request)
+        let plan = plans.isEmpty ? .success(.empty) : plans.removeFirst()
+        let outcome = outcome(for: plan, request: request)
+        guard requests.count == 1 else { return outcome }
+        firstScanOutcome = outcome
+        return await withCheckedContinuation { continuation in
+            firstScanContinuation = continuation
+        }
+    }
+
+    func cancelActiveWork() async {}
+
+    func releaseFirstScan() {
+        guard let continuation = firstScanContinuation else { return }
+        firstScanContinuation = nil
+        continuation.resume(returning: firstScanOutcome ?? .cancelled)
+    }
+
+    func count() -> Int { requests.count }
+
+    func triggers() -> [ScanTrigger] { requests.map(\.trigger) }
+
+    private func outcome(for plan: Plan, request: PortScanRequest) -> PortScanOutcome {
+        switch plan {
+        case let .success(snapshot):
+            return .success(TargetedPortSnapshot(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                snapshot: snapshot,
+                diagnostics: .zero
+            ))
+        case let .failure(error):
+            return .failure(
+                targetID: request.targetID,
+                sessionGeneration: request.sessionGeneration,
+                error: error,
+                diagnostics: .zero
+            )
+        }
+    }
 }
 
 private actor RecordingTerminator: ProcessTerminating {

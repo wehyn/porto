@@ -45,6 +45,7 @@ final class PortMonitor: ObservableObject {
     private var activeConnectionTestProfileID: UUID?
     private var activeConnectionTestScanner: (any PortSnapshotScanning)?
     private var pendingRefresh = false
+    private var pendingRefreshTrigger: ScanTrigger = .scheduled
     private var pendingManualRefresh = false
     private var activeScanIsManual = false
     private var sessionGeneration: UInt64 = 0
@@ -116,12 +117,14 @@ final class PortMonitor: ObservableObject {
             connectionsExpanded = false
             refreshProfiles()
             pendingRefresh = false
+            pendingRefreshTrigger = .scheduled
             pendingManualRefresh = false
             isManualRefreshing = false
             publishSelectedTargetState()
             requestRefresh(trigger: .presentation)
         } else {
             pendingRefresh = false
+            pendingRefreshTrigger = .scheduled
             pendingManualRefresh = false
             isManualRefreshing = false
             forceKillPrompt = nil
@@ -158,6 +161,7 @@ final class PortMonitor: ObservableObject {
                 // The existing scheduled refresh (or the next explicit
                 // refresh) will use the replacement scanner.
                 pendingRefresh = false
+                pendingRefreshTrigger = .scheduled
                 pendingManualRefresh = false
                 isManualRefreshing = false
                 if scanToken == nil && scheduleTask == nil {
@@ -323,7 +327,7 @@ final class PortMonitor: ObservableObject {
         scheduleTask?.cancel()
         scheduleTask = nil
         nextRetrySeconds = nil
-        pendingRefresh = true
+        queuePendingRefresh(trigger: .targetChange)
         pendingManualRefresh = false
         isManualRefreshing = false
         let previousScanner = activeScanner
@@ -368,7 +372,7 @@ final class PortMonitor: ObservableObject {
         }
         guard isPresented, let identity = row.localIdentity, identity.pid != ownPID,
               !connectionTestActive, activeTerminationIdentity == nil, activeRemoteTerminationKey == nil else { return }
-        pendingRefresh = true
+        queuePendingRefresh()
         cancelActiveScan()
         activeTerminationIdentity = identity
         let token = UUID()
@@ -410,7 +414,7 @@ final class PortMonitor: ObservableObject {
             return
         }
         forceKillPrompt = nil
-        pendingRefresh = true
+        queuePendingRefresh()
         cancelActiveScan()
         activeTerminationIdentity = identity
         let token = UUID()
@@ -455,7 +459,7 @@ final class PortMonitor: ObservableObject {
         guard isPresented, let profile = selectedRemoteProfile(), let key = remoteTerminationKey(for: row),
               !connectionTestActive, activeRemoteTerminationKey == nil, activeTerminationIdentity == nil else { return }
         guard let terminator = remoteTerminatorFactory?(profile) else { return }
-        pendingRefresh = true
+        queuePendingRefresh()
         cancelActiveScan()
         activeRemoteTerminationKey = key
         let token = UUID()
@@ -477,7 +481,7 @@ final class PortMonitor: ObservableObject {
               activeRemoteTerminationKey == nil else { return }
         guard let terminator = remoteTerminatorFactory?(profile) else { return }
         forceKillPrompt = nil
-        pendingRefresh = true
+        queuePendingRefresh()
         cancelActiveScan()
         activeRemoteTerminationKey = key
         let token = UUID()
@@ -516,12 +520,12 @@ final class PortMonitor: ObservableObject {
             let owner = remoteTerminationRows[key]
             removeRemoteTerminationState(forKey: key)
             if let owner { removeRemoteRows(for: owner, targetID: targetID ?? selectedTarget.id) }
-            if isPresented { pendingRefresh = true }
+            if isPresented { queuePendingRefresh() }
         case .forceKillAvailable:
             if let row = remoteTerminationRows[key] { setRemoteTerminationState(.forceKillAvailable, for: row, key: key) }
         case let .failed(error):
             if let row = remoteTerminationRows[key] { setRemoteTerminationState(.failed(error), for: row, key: key) }
-            if isPresented { pendingRefresh = true }
+            if isPresented { queuePendingRefresh() }
         case .cancelled: break
         }
         drainPendingRefreshIfPossible()
@@ -590,7 +594,7 @@ final class PortMonitor: ObservableObject {
         scheduleTask?.cancel()
         scheduleTask = nil
         nextRetrySeconds = nil
-        pendingRefresh = true
+        queuePendingRefresh(trigger: trigger)
         if isManual {
             pendingManualRefresh = true
             isManualRefreshing = true
@@ -598,14 +602,25 @@ final class PortMonitor: ObservableObject {
         drainPendingRefreshIfPossible(trigger: trigger)
     }
 
-    private func drainPendingRefreshIfPossible(trigger: ScanTrigger = .scheduled) {
+    private func queuePendingRefresh(trigger: ScanTrigger = .scheduled) {
+        pendingRefresh = true
+        // Preserve a higher-priority lifecycle or user-triggered refresh when
+        // a completion callback only requests an ordinary follow-up scan.
+        if trigger != .scheduled || pendingRefreshTrigger == .scheduled {
+            pendingRefreshTrigger = trigger
+        }
+    }
+
+    private func drainPendingRefreshIfPossible(trigger: ScanTrigger? = nil) {
         guard isPresented, !quitRequested, pendingRefresh,
               !connectionTestActive,
               activeTerminationIdentity == nil, activeRemoteTerminationKey == nil, scanToken == nil else { return }
+        let nextTrigger = trigger ?? pendingRefreshTrigger
         pendingRefresh = false
+        pendingRefreshTrigger = .scheduled
         let manual = pendingManualRefresh
         pendingManualRefresh = false
-        startScan(isManual: manual, trigger: manual ? .manual : trigger)
+        startScan(isManual: manual, trigger: manual ? .manual : nextTrigger)
     }
 
     private func startScan(isManual: Bool, trigger: ScanTrigger) {
@@ -675,6 +690,7 @@ final class PortMonitor: ObservableObject {
         }
         if !isPresented {
             pendingRefresh = false
+            pendingRefreshTrigger = .scheduled
             pendingManualRefresh = false
             isManualRefreshing = false
         } else if pendingRefresh {
@@ -724,11 +740,11 @@ final class PortMonitor: ObservableObject {
         case .exited:
             terminationStates.removeValue(forKey: identity)
             removeRows(for: identity)
-            if isPresented { pendingRefresh = true }
+            if isPresented { queuePendingRefresh() }
         case .forceKillAvailable: terminationStates[identity] = .forceKillAvailable
         case let .failed(failure):
             terminationStates[identity] = .failed(failure)
-            if isPresented { pendingRefresh = true }
+            if isPresented { queuePendingRefresh() }
         case .cancelled: terminationStates.removeValue(forKey: identity)
         }
         drainPendingRefreshIfPossible()
