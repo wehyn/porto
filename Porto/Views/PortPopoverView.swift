@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+internal func connectionsAccessibilityLabel(connectionCount: Int, isExpanded: Bool) -> String {
+    "Connections, \(connectionCount), \(isExpanded ? "expanded" : "collapsed")"
+}
+
 struct PortPopoverView: View {
     @ObservedObject var monitor: PortMonitor
     @ObservedObject var presentationObserver: MenuPresentationObserver
@@ -151,7 +155,12 @@ struct PortPopoverView: View {
                 Label("Connections (\(monitor.connectionRows.count))", systemImage: "link")
                     .font(.callout.weight(.medium))
             }
-            .accessibilityLabel("Connections, \(monitor.connectionRows.count), collapsed by default")
+            .accessibilityLabel(
+                connectionsAccessibilityLabel(
+                    connectionCount: monitor.connectionRows.count,
+                    isExpanded: monitor.connectionsExpanded
+                )
+            )
         }
     }
 

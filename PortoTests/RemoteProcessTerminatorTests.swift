@@ -56,8 +56,50 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let result = await terminator.stop(row: row)
         let operations = await runner.operations()
 
-        XCTAssertEqual(result, .forceKillAvailable)
+        XCTAssertEqual(result, .failed(.revalidationFailed))
         XCTAssertEqual(operations.filter { if case .scan = $0 { true } else { false } }.count, 20)
+    }
+
+    func testStopDoesNotOfferForceKillWhenPollingTimesOutBeforeRevalidation() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let output = Data("tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"app\",pid=42,fd=3)) ino:7 sk:cookie\n".utf8)
+        let row = try XCTUnwrap(parsedRow(output, targetID: targetID))
+        let timeline = TestTimeline()
+        let runner = TerminatorRunner(scanOutputs: [output])
+        let terminator = RemoteProcessTerminator(
+            profile: profile,
+            runner: runner,
+            clock: DeadlineAdvancingClock(timeline: timeline),
+            now: { timeline.now() }
+        )
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.revalidationFailed))
+        XCTAssertEqual(operations, [.scan, .signal(.term, pid: 42)])
+    }
+
+    func testForceKillFailsClosedWhenPollingTimesOutBeforeRevalidation() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let output = Data("tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"app\",pid=42,fd=3)) ino:7 sk:cookie\n".utf8)
+        let row = try XCTUnwrap(parsedRow(output, targetID: targetID))
+        let timeline = TestTimeline()
+        let runner = TerminatorRunner(scanOutputs: [output, output])
+        let terminator = RemoteProcessTerminator(
+            profile: profile,
+            runner: runner,
+            clock: DeadlineAdvancingClock(timeline: timeline),
+            now: { timeline.now() }
+        )
+
+        let result = await terminator.forceKill(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.revalidationFailed))
+        XCTAssertEqual(operations, [.scan, .signal(.kill, pid: 42)])
     }
 
     func testStopRejectsSamePIDAndNameWithDifferentSocketIdentity() async throws {
@@ -284,6 +326,14 @@ private struct AdvancingClock: MonitorSleeping {
 
     func sleep(for duration: Duration) async throws {
         timeline.advance(duration)
+    }
+}
+
+private struct DeadlineAdvancingClock: MonitorSleeping {
+    let timeline: TestTimeline
+
+    func sleep(for duration: Duration) async throws {
+        timeline.advance(.seconds(3))
     }
 }
 

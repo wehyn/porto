@@ -62,10 +62,12 @@ final class MenuPresentationObserver: ObservableObject {
             }
         )
         updateFromWindow()
+        scheduleWindowUpdate()
     }
 
     func contentDidAppear() {
         updateFromWindow()
+        scheduleWindowUpdate()
     }
 
     func provisionalContentDidDisappear() {
@@ -76,6 +78,7 @@ final class MenuPresentationObserver: ObservableObject {
         if !window.isVisible || !window.isKeyWindow || !NSApp.isActive {
             setPresented(false)
         }
+        scheduleWindowUpdate()
     }
 
     static func isPresented(
@@ -104,6 +107,13 @@ final class MenuPresentationObserver: ObservableObject {
     private func setPresented(_ presented: Bool) {
         guard isPresented != presented else { return }
         isPresented = presented
+    }
+
+    private func scheduleWindowUpdate() {
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.updateFromWindow()
+        }
     }
 
     private func removeObservers() {

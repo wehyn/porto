@@ -205,6 +205,7 @@ actor RemoteProcessTerminator: ProcessTerminating {
 
     private func waitForExit(row: PortProcess, checks: Int, forceKill: Bool) async -> TerminationOutcome {
         let deadline = now() + Self.waitBound
+        var observedPresent = false
         for _ in 0..<checks {
             guard !Task.isCancelled else { return .cancelled }
             let remaining = deadline - now()
@@ -216,12 +217,14 @@ actor RemoteProcessTerminator: ProcessTerminating {
             case .exited: return .exited
             case .forceKillAvailable: return .forceKillAvailable
             case .failed: return .failed(.revalidationFailed)
-            case .present: continue
-            case .timedOut: break
+            case .present:
+                observedPresent = true
+                continue
+            case .timedOut: return .failed(.revalidationFailed)
             case .cancelled: return .cancelled
             }
-            break
         }
+        guard observedPresent else { return .failed(.revalidationFailed) }
         return forceKill ? .failed(.stillAlive) : .forceKillAvailable
     }
 
