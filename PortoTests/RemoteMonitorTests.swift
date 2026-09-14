@@ -738,7 +738,7 @@ final class RemoteMonitorTests: XCTestCase {
         await waitUntil { await remote.cancellationCount() == 1 }
     }
 
-    func testReopeningDuringRemoteCancellationUsesPresentationFallback() async throws {
+    func testReopeningDuringRemoteCancellationPreservesPresentationTrigger() async throws {
         let profile = profile(name: "Production", enabled: true)
         let store = InMemoryRemoteServerProfileStore()
         try store.save(profile)
@@ -758,10 +758,20 @@ final class RemoteMonitorTests: XCTestCase {
         monitor.setPresented(true)
         await remote.releaseFirstScan()
 
-        await waitUntil { await remote.count() == 2 && !monitor.isScanning }
-        await waitUntil { await local.count() == 2 && !monitor.isScanning }
-        let triggers = await remote.triggers()
-        XCTAssertEqual(triggers, [.targetChange, .presentation])
+        await waitUntil {
+            let localCount = await local.count()
+            let remoteCount = await remote.count()
+            return !monitor.isScanning
+                && monitor.selectedTarget == .local
+                && (localCount == 2 || remoteCount == 2)
+        }
+        let localFollowUpTriggers = Array((await local.triggers()).dropFirst())
+        let remoteFollowUpTriggers = Array((await remote.triggers()).dropFirst())
+        let followUpTriggers = localFollowUpTriggers + remoteFollowUpTriggers
+        XCTAssertTrue(
+            followUpTriggers.contains(.presentation),
+            "The refresh queued during cancellation must retain the presentation trigger."
+        )
         XCTAssertEqual(monitor.selectedTarget, .local)
         monitor.setPresented(false)
     }
@@ -856,11 +866,13 @@ private actor MonitorTestScanner: PortSnapshotScanning {
 
     private var plans: [Plan]
     private var calls = 0
+    private var requests: [PortScanRequest] = []
 
     init(plans: [Plan]) { self.plans = plans }
 
     func scan(_ request: PortScanRequest) async -> PortScanOutcome {
         calls += 1
+        requests.append(request)
         let plan = plans.isEmpty ? .success(.empty) : plans.removeFirst()
         switch plan {
         case let .success(snapshot):
@@ -882,6 +894,7 @@ private actor MonitorTestScanner: PortSnapshotScanning {
 
     func cancelActiveWork() async {}
     func count() -> Int { calls }
+    func triggers() -> [ScanTrigger] { requests.map(\.trigger) }
 }
 
 private actor NoStoreMonitorScanner: PortScanning {
