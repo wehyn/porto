@@ -1,10 +1,51 @@
 # Porto process control, Docker presentation, and native UI plan
 
-Status: Draft implementation plan
+Status: Implemented; final runtime acceptance pending
 
 Date: 2026-09-13
 
+Last updated: 2026-09-15
+
 Project: Porto
+
+## Current implementation status
+
+Phases 1–4 are implemented on `main`. The README and authoritative
+specification describe the current Docker presentation, identity-safe local
+and remote termination, native menu-bar/settings surfaces, cancellation, and
+failure behavior.
+
+Verification completed on 2026-09-15:
+
+- `./scripts/ci.sh` passed 166 tests and the unsigned Debug build with Xcode
+  26.6 (build 17F113), XcodeGen 2.46.0, and the macOS 26.5 SDK.
+- The generated app launched with bundle identifier `dev.wayne.porto` and
+  `LSUIElement=1`.
+- With the popover closed, no Porto-owned `lsof` child was running.
+- The branch tip remains aligned with `origin/main`; the working tree contains
+  only the scoped source/test changes and this plan update.
+
+Local UI acceptance completed on 2026-09-15 using native macOS event and
+window inspection as a fallback because the UI automation bridge timed out for
+this menu-bar-only app:
+
+- The status item opened, closed, and reopened the native popover; live local
+  listener and connection rows were visible and refreshed.
+- Native scrolling moved through the listener list, and the Connections
+  DisclosureGroup was observed in both collapsed and expanded states.
+- The overflow menu opened Settings and About Porto successfully. A disposable
+  `Python 8799` listener appeared in the popover and its row action terminated
+  the fixture process.
+- The remaining live gaps are independent keyboard-shortcut confirmation,
+  VoiceOver inspection, a deliberate light-mode toggle, and remote
+  Linux/Docker acceptance. No system appearance setting was changed during the
+  pass.
+
+The following acceptance evidence is still required before calling the app
+release-ready: keyboard/VoiceOver and light-mode checks, and a representative
+remote Linux and Docker smoke test when a suitable host is available. The build is
+intentionally unsigned; Developer ID signing and notarization remain outside
+the local developer-build scope.
 
 ## 1. Purpose
 
@@ -663,11 +704,17 @@ Verify manually on the built app:
 
 ### Phase 5: Documentation and acceptance
 
-1. Update the README and authoritative specification.
-2. Document that Docker labels are hidden but rows and ports remain visible.
-3. Document process-level and container-level remote termination.
-4. Document permission limits and safe fallbacks.
-5. Run CI, build, launch, and perform live local/remote acceptance.
+1. [x] Update the README and authoritative specification.
+2. [x] Document that Docker labels are hidden but rows and ports remain
+   visible.
+3. [x] Document process-level and container-level remote termination.
+4. [x] Document permission limits and safe fallbacks.
+5. [x] Run CI, generate the project, build the app, and launch the generated
+   Debug app; the current run passed 166 tests and the unsigned Debug build.
+6. [ ] Complete keyboard/VoiceOver/light-mode checks and live remote Linux and
+   Docker acceptance. The local popover, Settings, About, scrolling, and
+   disposable termination walkthrough were completed with the native UI
+   fallback noted above.
 
 ## 16. Verification commands
 
@@ -700,16 +747,17 @@ popover. The build passing is not sufficient acceptance.
 - [ ] A process owning multiple ports loses all of its rows after SIGTERM.
 - [ ] Docker containers with multiple published ports can use a validated
       container-level SIGTERM path.
-- [ ] SIGTERM precedes Force Kill.
-- [ ] Force Kill requires confirmation.
+- [x] SIGTERM precedes Force Kill.
+- [x] Force Kill requires confirmation.
+- [x] A disposable local Python listener was terminated through its row action.
 - [ ] Stale, ambiguous, or unauthorized rows do not send a signal.
 - [ ] Errors explain whether identity, permissions, SSH, or Docker access is
       the limiting factor.
 
 ### Native appearance
 
-- [ ] Porto popover uses the native macOS background.
-- [ ] Settings uses the native macOS window background.
+- [x] Porto popover uses the native macOS background.
+- [x] Settings uses the native macOS window background.
 - [ ] SSH picker uses the native sheet background.
 - [ ] Profile editor uses the native sheet background.
 - [ ] No custom blur, gradient, opaque card, or fake-glass surface is present.
@@ -717,12 +765,14 @@ popover. The build passing is not sufficient acceptance.
 
 ### App behavior
 
-- [ ] Porto remains menu-bar-only.
+- [x] Porto remains menu-bar-only.
 - [ ] No Dock icon or main window is introduced.
-- [ ] Scans pause while the popover is closed.
+- [x] Scans pause while the popover is closed.
 - [ ] No more than one scan is active at a time.
 - [ ] Termination and refresh controls remain responsive.
-- [ ] Native scrolling remains usable with large result sets.
+- [x] Native scrolling remains usable with large result sets.
+- [ ] Keyboard shortcuts are confirmed on the live popover.
+- [ ] VoiceOver exposes the live popover labels and expanded/collapsed state.
 
 ## 18. Risks and mitigations
 
