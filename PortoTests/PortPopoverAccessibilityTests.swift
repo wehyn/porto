@@ -1,7 +1,6 @@
 import XCTest
 @testable import Porto
 
-@MainActor
 final class PortPopoverAccessibilityTests: XCTestCase {
     func testPopoverUsesApprovedCompactWidth() {
         XCTAssertEqual(PortPopoverView.popoverWidth, 300)
