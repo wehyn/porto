@@ -10,6 +10,24 @@ final class PortPopoverAccessibilityTests: XCTestCase {
         XCTAssertEqual(PortPopoverView.targetSelectorWidth, 180)
     }
 
+    func testRefreshingUsesAStableNativeProgressPresentation() {
+        XCTAssertEqual(
+            refreshIndicatorPresentation(isManualRefreshing: true, reduceMotion: false),
+            .progress
+        )
+    }
+
+    func testRefreshIndicatorUsesTheArrowWhenIdleOrMotionIsReduced() {
+        XCTAssertEqual(
+            refreshIndicatorPresentation(isManualRefreshing: false, reduceMotion: false),
+            .arrow
+        )
+        XCTAssertEqual(
+            refreshIndicatorPresentation(isManualRefreshing: true, reduceMotion: true),
+            .arrow
+        )
+    }
+
     func testConnectionsAccessibilityLabelForCollapsedSection() {
         XCTAssertEqual(
             connectionsAccessibilityLabel(connectionCount: 3, isExpanded: false),
