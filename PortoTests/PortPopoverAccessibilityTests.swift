@@ -6,6 +6,10 @@ final class PortPopoverAccessibilityTests: XCTestCase {
         XCTAssertEqual(PortPopoverView.popoverWidth, 300)
     }
 
+    func testTargetPickerLeavesTrailingActionsTogether() {
+        XCTAssertEqual(PortPopoverView.targetSelectorWidth, 180)
+    }
+
     func testConnectionsAccessibilityLabelForCollapsedSection() {
         XCTAssertEqual(
             connectionsAccessibilityLabel(connectionCount: 3, isExpanded: false),

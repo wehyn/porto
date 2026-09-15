@@ -43,6 +43,33 @@ The main agent always owns planning, integration, and final verification across 
 - Do not add privileged helpers, launch daemons, or elevated scans in v1.
 - Keep visible row actions icon-only, while providing useful tooltips and accessibility labels.
 
+## Versioning and releases
+
+- Treat `project.yml` as the canonical version source. Update `MARKETING_VERSION`
+  for the user-facing release version and increment `CURRENT_PROJECT_VERSION`
+  for each published build. Do not edit the generated `Porto.xcodeproj`.
+- Release tags must match the marketing version as `v<MARKETING_VERSION>`.
+  Confirm the tag, bundle version, and release filename all agree before
+  publishing.
+- Run `./scripts/ci.sh` before packaging a release. For a local release build,
+  run `./scripts/package-unsigned.sh`; it regenerates the project, builds a
+  Release configuration, verifies the `dev.wayne.porto` bundle, requires a
+  universal `arm64` + `x86_64` binary, creates the ZIP, and writes its SHA-256
+  file under `dist/`.
+- Verify local artifacts with `unzip -tq dist/Porto-*-macOS-universal.zip` and
+  `shasum -a 256 -c dist/Porto-*.sha256` from a `dist/` directory containing
+  only the release under review. Keep `dist/`, generated projects, build
+  products, and signing artifacts out of commits.
+- Releases are unsigned and unnotarized developer builds; Apple Developer
+  credentials are not required. Do not describe an unsigned artifact as signed
+  or notarized, and preserve the README guidance for Gatekeeper's first-launch
+  warning.
+- After verification, push the matching `v<version>` tag. The
+  `.github/workflows/unsigned-release.yml` workflow packages the tag on macOS
+  26 with the pinned Xcode build and creates the GitHub Release with the ZIP
+  and checksum assets. Inspect the published assets and verify the checksum
+  before sharing the release.
+
 ## Git
 
 - Keep commits focused and describe the behavior they introduce.
