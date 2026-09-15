@@ -412,7 +412,7 @@ private struct RemoteServerProfileEditor: View {
             Form {
                 TextField("Display name", text: $draft.displayName)
                 TextField("Hostname", text: $hostnameEntry, prompt: Text("user@hostname"))
-                    .help("Enter a username and host, for example dei@192.168.2.28")
+                    .help("Enter a username and host, for example developer@192.0.2.28")
                 TextField("Port", value: $draft.port, format: .number)
                 LabeledContent("File path") {
                     HStack {
@@ -471,7 +471,7 @@ private struct RemoteServerProfileEditor: View {
 
     private func save() {
         guard let profile = profileUsingHostnameEntry() else {
-            validationMessage = "Enter a hostname in the form user@host, for example dei@192.168.2.28."
+            validationMessage = "Enter a hostname in the form user@host, for example developer@192.0.2.28."
             return
         }
         do {
@@ -486,7 +486,7 @@ private struct RemoteServerProfileEditor: View {
 
     private func testConnection() {
         guard let profile = profileUsingHostnameEntry() else {
-            validationMessage = "Enter a hostname in the form user@host, for example dei@192.168.2.28."
+            validationMessage = "Enter a hostname in the form user@host, for example developer@192.0.2.28."
             return
         }
         validationMessage = nil

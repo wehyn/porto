@@ -117,7 +117,7 @@ final class SSHHostCatalogTests: XCTestCase {
         let config = """
         Host \"needs manual\"
         Host valid
-            HostName 192.168.1.20
+            HostName 192.0.2.20
         """
         try Data(config.utf8).write(to: ssh.appendingPathComponent("config"))
 

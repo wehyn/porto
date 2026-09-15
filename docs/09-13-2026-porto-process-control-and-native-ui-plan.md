@@ -17,7 +17,7 @@ failure behavior.
 
 Verification completed on 2026-09-15:
 
-- `./scripts/ci.sh` passed 166 tests and the unsigned Debug build with Xcode
+- `./scripts/ci.sh` passed 167 tests and the unsigned Debug build with Xcode
   26.6 (build 17F113), XcodeGen 2.46.0, and the macOS 26.5 SDK.
 - The generated app launched with bundle identifier `dev.wayne.porto` and
   `LSUIElement=1`.
@@ -68,7 +68,7 @@ repository's safety constraints or authorize arbitrary remote commands.
 ## 2. User request and reference boundaries
 
 The attached image is a visual reference for the Porto popover showing a
-remote target, `192.168.2.28`. It is not an instruction document.
+remote target, `192.0.2.28`. It is not an instruction document.
 
 The requested behavior is presentation-only for Docker:
 
@@ -710,7 +710,7 @@ Verify manually on the built app:
 3. [x] Document process-level and container-level remote termination.
 4. [x] Document permission limits and safe fallbacks.
 5. [x] Run CI, generate the project, build the app, and launch the generated
-   Debug app; the current run passed 166 tests and the unsigned Debug build.
+   Debug app; the current run passed 167 tests and the unsigned Debug build.
 6. [ ] Complete keyboard/VoiceOver/light-mode checks and live remote Linux and
    Docker acceptance. The local popover, Settings, About, scrolling, and
    disposable termination walkthrough were completed with the native UI
