@@ -41,6 +41,23 @@ Append `CODE_SIGNING_ALLOWED=NO` for an unsigned build. The CI script already
 uses that setting. Set `PORTO_EXPECTED_XCODE_BUILD` only when intentionally
 accepting a newly audited Xcode build.
 
+## Create an unsigned developer release
+
+To create a universal macOS Release ZIP without Apple Developer credentials:
+
+```sh
+./scripts/package-unsigned.sh
+unzip -l dist/Porto-*-macOS-universal.zip
+shasum -a 256 -c dist/Porto-*.sha256
+```
+
+The ZIP is unsigned or ad-hoc signed and is not notarized. Share it only with
+people who trust the source and can verify the checksum. macOS may block the
+first launch; if the build is trusted, open it once, then use System Settings →
+Privacy & Security → Open Anyway. Do not disable Gatekeeper globally. A
+Developer ID/notarized release is intentionally a separate future distribution
+step.
+
 ## Launch the generated app
 
 After the deterministic local Debug build above, launch the app with:
@@ -141,3 +158,9 @@ keeps controls disabled when remote identity or permissions cannot be verified.
 
 Porto does not persist port/process data or collect telemetry. It does not use
 privileged helpers or elevated scans.
+
+## Project policies
+
+- [MIT License](LICENSE)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
