@@ -100,7 +100,7 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 
 ### 5.2 Popover layout
 
-- The popover is 360 points wide, with minimum content height 180 points and maximum height 560 points or available screen height, whichever is smaller.
+- The popover is 300 points wide, with minimum content height 180 points and maximum height 560 points or available screen height, whichever is smaller.
 - Overflowing content uses native vertical scrolling; Porto must not simulate or intercept scrolling.
 - A fixed header contains `Porto`, a manual refresh button, and an overflow menu.
 - The refresh button has accessibility label and help text `Refresh ports`. When the popover has keyboard focus, Command-R invokes the same coalesced refresh path.

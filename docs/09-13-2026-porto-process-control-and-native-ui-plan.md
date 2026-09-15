@@ -421,7 +421,7 @@ surface.
 
 ### 10.2 Layout
 
-Use the existing approximately 360 by 560 popover dimensions and native
+Use the existing approximately 300 by 560 popover dimensions and native
 scrolling.
 
 Recommended hierarchy:

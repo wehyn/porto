@@ -6,6 +6,8 @@ internal func connectionsAccessibilityLabel(connectionCount: Int, isExpanded: Bo
 }
 
 struct PortPopoverView: View {
+    nonisolated internal static let popoverWidth: CGFloat = 300
+
     @ObservedObject var monitor: PortMonitor
     @ObservedObject var presentationObserver: MenuPresentationObserver
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -35,7 +37,7 @@ struct PortPopoverView: View {
             .scrollIndicators(.automatic)
             footer
         }
-        .frame(width: 360, height: 560)
+        .frame(width: Self.popoverWidth, height: 560)
         .confirmationDialog(forceKillTitle, isPresented: forceKillPromptBinding, titleVisibility: .visible) {
             Button("Force Kill", role: .destructive) { monitor.confirmForceKill() }
             Button("Cancel", role: .cancel) { monitor.cancelForceKillPrompt() }
