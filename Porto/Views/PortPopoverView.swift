@@ -7,6 +7,15 @@ internal func connectionsAccessibilityLabel(connectionCount: Int, isExpanded: Bo
 
 struct PortPopoverView: View {
     nonisolated internal static let popoverWidth: CGFloat = 300
+    nonisolated internal static let targetSelectorHorizontalPadding: CGFloat = 14
+    nonisolated internal static let targetSelectorActionButtonSize: CGFloat = 44
+    nonisolated internal static let targetSelectorActionSpacing: CGFloat = 4
+    nonisolated internal static let targetSelectorActionButtonSpacing: CGFloat = 0
+    nonisolated internal static let targetSelectorWidth: CGFloat =
+        popoverWidth - (targetSelectorHorizontalPadding * 2)
+            - (targetSelectorActionButtonSize * 2)
+            - targetSelectorActionSpacing
+            - targetSelectorActionButtonSpacing
 
     @ObservedObject var monitor: PortMonitor
     @ObservedObject var presentationObserver: MenuPresentationObserver
@@ -15,8 +24,6 @@ struct PortPopoverView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.65)
             targetSelector
             Divider().opacity(0.65)
             ScrollView(.vertical) {
@@ -46,46 +53,6 @@ struct PortPopoverView: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Text("Porto").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
-            Spacer(minLength: 8)
-                Button(action: monitor.refresh) {
-                    Image(systemName: "arrow.clockwise")
-                        .imageScale(.medium)
-                    .rotationEffect(.degrees(monitor.isManualRefreshing && !reduceMotion ? 360 : 0))
-                    .animation(
-                        monitor.isManualRefreshing && !reduceMotion
-                            ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
-                        value: monitor.isManualRefreshing
-                    )
-            }
-                .buttonStyle(.borderless)
-                .frame(width: 44, height: 44)
-            .accessibilityLabel("Refresh ports")
-            .help("Refresh ports")
-            .keyboardShortcut("r", modifiers: [.command])
-
-            Menu {
-                Button("Settings…") { openSettings() }
-                Divider()
-                Button("About Porto") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    NSApp.orderFrontStandardAboutPanel(nil)
-                }
-                Divider()
-                Button("Quit Porto") { monitor.quitApplication() }
-            } label: {
-                Image(systemName: "ellipsis.circle").imageScale(.medium)
-            }
-            .menuStyle(.borderlessButton)
-            .accessibilityLabel("Porto menu")
-            .help("About Porto and Quit Porto")
-        }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-    }
-
     private func openSettings() {
         openWindow(id: "settings")
         SettingsWindowPresenter.bringToFront()
@@ -93,15 +60,19 @@ struct PortPopoverView: View {
 
     private var targetSelector: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Picker("Target", selection: targetBinding) {
-                ForEach(monitor.availableTargets, id: \.self) { target in
-                    Text(target.displayName).tag(target)
+            HStack(spacing: Self.targetSelectorActionSpacing) {
+                TargetSelectorControl(
+                    targets: monitor.availableTargets,
+                    selection: targetBinding,
+                    isDisabled: monitor.isTargetPickerDisabled
+                )
+                .frame(width: Self.targetSelectorWidth, alignment: .leading)
+
+                HStack(spacing: Self.targetSelectorActionButtonSpacing) {
+                    refreshButton
+                    overflowMenu
                 }
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .disabled(monitor.isTargetPickerDisabled)
-            .accessibilityLabel("Port monitoring target")
             if monitor.profiles.isEmpty {
                 Text("Add a remote server profile in Settings to inspect another machine over SSH.")
                     .font(.caption2)
@@ -109,8 +80,45 @@ struct PortPopoverView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Self.targetSelectorHorizontalPadding)
         .padding(.vertical, 9)
+    }
+
+    private var refreshButton: some View {
+        Button(action: monitor.refresh) {
+            Image(systemName: "arrow.clockwise")
+                .imageScale(.medium)
+                .rotationEffect(.degrees(monitor.isManualRefreshing && !reduceMotion ? 360 : 0))
+                .animation(
+                    monitor.isManualRefreshing && !reduceMotion
+                        ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                    value: monitor.isManualRefreshing
+                )
+        }
+        .buttonStyle(.borderless)
+        .frame(width: Self.targetSelectorActionButtonSize, height: Self.targetSelectorActionButtonSize)
+        .accessibilityLabel("Refresh ports")
+        .help("Refresh ports")
+        .keyboardShortcut("r", modifiers: [.command])
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Button("Settings…") { openSettings() }
+            Divider()
+            Button("About Porto") {
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.orderFrontStandardAboutPanel(nil)
+            }
+            Divider()
+            Button("Quit Porto") { monitor.quitApplication() }
+        } label: {
+            Image(systemName: "ellipsis.circle").imageScale(.medium)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: Self.targetSelectorActionButtonSize, height: Self.targetSelectorActionButtonSize)
+        .accessibilityLabel("Porto menu")
+        .help("About Porto and Quit Porto")
     }
 
     private var targetBinding: Binding<PortTarget> {
@@ -226,5 +234,51 @@ struct PortPopoverView: View {
 
     private var forceKillPromptBinding: Binding<Bool> {
         Binding(get: { monitor.forceKillPrompt != nil }, set: { if !$0 { monitor.cancelForceKillPrompt() } })
+    }
+}
+
+private struct TargetSelectorControl: NSViewRepresentable {
+    let targets: [PortTarget]
+    @Binding var selection: PortTarget
+    let isDisabled: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.selectionDidChange(_:))
+        button.setAccessibilityLabel("Port monitoring target")
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.parent = self
+
+        button.removeAllItems()
+        for target in targets {
+            button.addItem(withTitle: target.displayName)
+            button.lastItem?.representedObject = target.id.rawValue
+        }
+        button.selectItem(withTitle: selection.displayName)
+        button.isEnabled = !isDisabled
+    }
+
+    final class Coordinator: NSObject {
+        var parent: TargetSelectorControl
+
+        init(parent: TargetSelectorControl) {
+            self.parent = parent
+        }
+
+        @MainActor @objc func selectionDidChange(_ sender: NSPopUpButton) {
+            guard let targetID = sender.selectedItem?.representedObject as? String,
+                  let target = parent.targets.first(where: { $0.id.rawValue == targetID }) else {
+                return
+            }
+            parent.selection = target
+        }
     }
 }
