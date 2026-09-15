@@ -70,7 +70,10 @@ checksum_path="$zip_path.sha256"
 
 ditto --norsrc -c -k --keepParent "$app_path" "$zip_path"
 unzip -tq "$zip_path"
-shasum -a 256 "$zip_path" > "$checksum_path"
+(
+    cd "$output_dir"
+    shasum -a 256 "${zip_path:t}" > "${checksum_path:t}"
+)
 
 print "Created unsigned/ad-hoc developer release: $zip_path"
 print "SHA-256 checksum: $checksum_path"
