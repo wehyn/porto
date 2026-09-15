@@ -29,3 +29,6 @@ xcuserdata/
 # Logs and temporary files
 *.log
 *.tmp
+
+# Local planning notes
+docs/plans/
