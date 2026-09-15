@@ -5,6 +5,18 @@ internal func connectionsAccessibilityLabel(connectionCount: Int, isExpanded: Bo
     "Connections, \(connectionCount), \(isExpanded ? "expanded" : "collapsed")"
 }
 
+enum RefreshIndicatorPresentation: Equatable {
+    case arrow
+    case progress
+}
+
+func refreshIndicatorPresentation(
+    isManualRefreshing: Bool,
+    reduceMotion: Bool
+) -> RefreshIndicatorPresentation {
+    isManualRefreshing && !reduceMotion ? .progress : .arrow
+}
+
 struct PortPopoverView: View {
     nonisolated internal static let popoverWidth: CGFloat = 300
     nonisolated internal static let targetSelectorHorizontalPadding: CGFloat = 14
@@ -86,20 +98,28 @@ struct PortPopoverView: View {
 
     private var refreshButton: some View {
         Button(action: monitor.refresh) {
-            Image(systemName: "arrow.clockwise")
-                .imageScale(.medium)
-                .rotationEffect(.degrees(monitor.isManualRefreshing && !reduceMotion ? 360 : 0))
-                .animation(
-                    monitor.isManualRefreshing && !reduceMotion
-                        ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
-                    value: monitor.isManualRefreshing
-                )
+            refreshIndicator
         }
         .buttonStyle(.borderless)
         .frame(width: Self.targetSelectorActionButtonSize, height: Self.targetSelectorActionButtonSize)
         .accessibilityLabel("Refresh ports")
         .help("Refresh ports")
         .keyboardShortcut("r", modifiers: [.command])
+    }
+
+    @ViewBuilder
+    private var refreshIndicator: some View {
+        switch refreshIndicatorPresentation(
+            isManualRefreshing: monitor.isManualRefreshing,
+            reduceMotion: reduceMotion
+        ) {
+        case .arrow:
+            Image(systemName: "arrow.clockwise")
+                .imageScale(.medium)
+        case .progress:
+            ProgressView()
+                .controlSize(.small)
+        }
     }
 
     private var overflowMenu: some View {
@@ -209,7 +229,7 @@ struct PortPopoverView: View {
             Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
             Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             Spacer(minLength: 4)
-            Button(action: monitor.retry) { Image(systemName: "arrow.clockwise") }
+            Button(action: monitor.retry) { refreshIndicator }
                 .buttonStyle(.borderless)
                 .frame(width: 44, height: 44)
                 .accessibilityLabel("Retry port scan")
