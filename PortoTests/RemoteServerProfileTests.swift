@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class RemoteServerProfileTests: XCTestCase {
     func testSSHImportPlannerMapsOnlySelectedCandidatesAndDisablesProfiles() {
-        let selected = SSHHostCandidate(alias: "work", host: "10.0.0.8", username: "deploy", port: 2200, identityFilePath: "/tmp/work.key")
+        let selected = SSHHostCandidate(alias: "work", host: "192.0.2.8", username: "deploy", port: 2200, identityFilePath: "/tmp/work.key")
         let ignored = SSHHostCandidate(alias: "ignored", host: "ignored.example", username: "user")
 
         let imported = SSHConnectionImportPlanner.profiles(
@@ -16,7 +16,7 @@ final class RemoteServerProfileTests: XCTestCase {
 
         XCTAssertEqual(imported.count, 1)
         XCTAssertEqual(imported.first?.displayName, "work")
-        XCTAssertEqual(imported.first?.host, "10.0.0.8")
+        XCTAssertEqual(imported.first?.host, "192.0.2.8")
         XCTAssertEqual(imported.first?.username, "deploy")
         XCTAssertEqual(imported.first?.port, 2200)
         XCTAssertEqual(imported.first?.identityFilePath, "/tmp/work.key")
@@ -57,23 +57,23 @@ final class RemoteServerProfileTests: XCTestCase {
     }
 
     func testSSHAddressCombinesUsernameAndHostAndFormatsIPv6() {
-        let profile = RemoteServerProfile(displayName: "Dev", host: "192.168.2.28", username: "dei")
-        XCTAssertEqual(profile.sshAddress, "dei@192.168.2.28")
+        let profile = RemoteServerProfile(displayName: "Dev", host: "192.0.2.28", username: "developer")
+        XCTAssertEqual(profile.sshAddress, "developer@192.0.2.28")
 
-        let ipv6 = RemoteServerProfile(displayName: "Dev", host: "2001:db8::10", username: "dei")
-        XCTAssertEqual(ipv6.sshAddress, "dei@[2001:db8::10]")
+        let ipv6 = RemoteServerProfile(displayName: "Dev", host: "2001:db8::10", username: "developer")
+        XCTAssertEqual(ipv6.sshAddress, "developer@[2001:db8::10]")
     }
 
     func testSSHAddressParserAcceptsUserAtHostAndRejectsUnsafeValues() {
         XCTAssertEqual(
-            RemoteServerProfile.parseSSHAddress("dei@192.168.2.28")?.username,
-            "dei"
+            RemoteServerProfile.parseSSHAddress("developer@192.0.2.28")?.username,
+            "developer"
         )
         XCTAssertEqual(
-            RemoteServerProfile.parseSSHAddress("dei@[2001:db8::10]")?.host,
+            RemoteServerProfile.parseSSHAddress("developer@[2001:db8::10]")?.host,
             "[2001:db8::10]"
         )
-        for value in ["192.168.2.28", "@host", "dei@", "dei@host name", "dei@host;exit", "dei@host@other"] {
+        for value in ["192.0.2.28", "@host", "developer@", "developer@host name", "developer@host;exit", "developer@host@other"] {
             XCTAssertNil(RemoteServerProfile.parseSSHAddress(value), "Expected invalid SSH address: \(value)")
         }
     }
@@ -103,7 +103,7 @@ final class RemoteServerProfileTests: XCTestCase {
 
     func testValidationAcceptsHostnameAndIPv4AndIPv6HostForms() {
         for host in [
-            "host", "dev.example", "dev-1.example.com", "192.168.1.20",
+            "host", "dev.example", "dev-1.example.com", "192.0.2.20",
             "::1", "2001:db8::10", "[::1]", "fe80::1%en0", "[fe80::1%en0]"
         ] {
             let profile = RemoteServerProfile(displayName: "Dev", host: host, username: "user")

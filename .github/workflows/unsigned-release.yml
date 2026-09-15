@@ -1,0 +1,43 @@
+name: Unsigned developer release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unsigned-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-and-release:
+    name: Package and release unsigned app
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.6
+        run: sudo xcode-select --switch /Applications/Xcode_26.6.app
+
+      - name: Install XcodeGen
+        run: brew list --versions xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+      - name: Build unsigned universal ZIP
+        env:
+          PORTO_EXPECTED_XCODE_BUILD: 17F113
+        run: ./scripts/package-unsigned.sh
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Porto-*-macOS-universal.zip \
+            dist/Porto-*.sha256 \
+            --title "Porto $GITHUB_REF_NAME" \
+            --generate-notes
