@@ -20,5 +20,19 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Wayne. All rights reserved.</string>
+	<key>SUFeedURL</key>
+	<string>https://github.com/wehyn/porto/releases/latest/download/appcast.xml</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SUPublicEDKey</key>
+	<string>82W2F80W3ujEqa1CbheATmmmselTk5IJgIvW6SYlPTM=</string>
 </dict>
 </plist>

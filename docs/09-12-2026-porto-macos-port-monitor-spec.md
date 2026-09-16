@@ -17,6 +17,11 @@ defined below.
 
 This specification defines the v1 product behavior, architecture, data contract, process-safety rules, error handling, performance limits, test coverage, and release acceptance criteria. **Must** is release-blocking, **should** requires a documented reason to omit, and **may** is optional.
 
+Automatic updates are defined by the approved [Sparkle automatic update
+follow-up](09-16-2026-porto-sparkle-auto-update-spec.md). That follow-up
+supplements this base product specification without changing Porto's menu-bar,
+scan, process-control, privacy, or distribution scope.
+
 ## 2. Goals and success criteria
 
 ### 2.1 Goals
@@ -69,7 +74,7 @@ V1 is acceptable only when all of the following are true:
 - Search, filtering, sorting controls, process icons, code-signing metadata lookup, or application bundle resolution.
 - Terminal launch, command copy, or IDE integration. The row/action design must leave room for these later.
 - Arbitrary hostname entry, multi-host dashboards, unmanaged containers, and virtual machines. Remote inspection/control is limited to one literal SSH alias at a time; Docker container control is limited to validated published-container rows.
-- App Store, Developer ID distribution, notarization, auto-update, analytics, crash reporting, or telemetry. Public distribution requires a separate specification.
+- App Store, Developer ID distribution, notarization, analytics, crash reporting, or telemetry. Sparkle-based direct-distribution updates are defined by the follow-up specification; they do not authorize Apple signing or notarization.
 
 ## 4. Definitions and classification
 
@@ -560,12 +565,12 @@ docs/
 - Product: macOS application; deployment target: macOS 26.0.
 - Swift language mode 6 using the Swift 6.3 compiler in the compatible Xcode 26 toolchain. Record the exact accepted Xcode build in the README and CI configuration rather than assuming a point release.
 - Bundle identifier: `dev.wayne.porto` unless changed before first signed release.
-- Marketing version `1.0.0`; build `1`.
+- Marketing version `1.0.2`; build `3`.
 - Generated Info.plist contains `LSUIElement: true`.
 - App Sandbox disabled.
 - Project-owned Swift warnings are errors in CI.
 - Use standard architectures supported by the macOS 26 SDK; do not hard-code one architecture.
-- No third-party runtime dependencies in v1.
+- The only approved third-party runtime dependency in v1 is Sparkle 2.9.2 for direct-distribution updates, as defined by the follow-up specification.
 
 Unsigned CI may set `CODE_SIGNING_ALLOWED=NO`. Runtime acceptance uses a locally runnable signed or ad-hoc-signed Debug app. Public signing and notarization are outside v1.
 
@@ -762,7 +767,7 @@ These are not v1 requirements, but architecture must not prevent them:
 - Row action menu for terminal launch, diagnostic command copy, or revealing an owning app.
 - Search and user-selectable sorting.
 - Launch at login and persisted preferences.
-- Signed and notarized distribution.
+- Apple-signed and notarized distribution.
 - Process icons and application bundle metadata.
 - Historical snapshots or change highlighting, subject to a new privacy specification.
 

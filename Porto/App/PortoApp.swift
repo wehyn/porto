@@ -5,6 +5,7 @@ import SwiftUI
 struct PortoApp: App {
     @StateObject private var monitor: PortMonitor
     @StateObject private var presentationObserver: MenuPresentationObserver
+    @StateObject private var updater: PortoUpdater
 
     init() {
         let runner = LsofRunner()
@@ -27,11 +28,12 @@ struct PortoApp: App {
             }
         ))
         _presentationObserver = StateObject(wrappedValue: MenuPresentationObserver())
+        _updater = StateObject(wrappedValue: PortoUpdater())
     }
 
     var body: some Scene {
         MenuBarExtra("Porto", systemImage: "network") {
-            PortPopoverView(monitor: monitor, presentationObserver: presentationObserver)
+            PortPopoverView(monitor: monitor, presentationObserver: presentationObserver, updater: updater)
                 .background(
                     MenuWindowProbe { window in
                         presentationObserver.attach(to: window)

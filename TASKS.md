@@ -1,0 +1,17 @@
+# Porto Sparkle automatic updates execution ledger
+
+Source of truth: `docs/plans/2026-09-16-01-55-porto-sparkle-auto-updates.md` and
+`docs/09-16-2026-porto-sparkle-auto-update-spec.md`.
+
+Release-sensitive work explicitly deferred by the user: production Ed25519
+key generation/storage, GitHub secret changes, bridge-version bump, tags,
+publishing, and GitHub Releases.
+
+| ID | Objective | Owner | Scope | Status | Acceptance checks | Verification evidence | Commit/branch |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| S1 | Add pinned Sparkle dependency and configuration contract | Root/worker | `project.yml`, `Porto/Resources/Info.plist`, configuration tests | DONE | Sparkle 2.9.2 resolves; plist contract tests pass; production key remains outside the repository | Fresh `plutil -lint`: OK; `xcodebuild -resolvePackageDependencies`: Sparkle @ 2.9.2; focused test: 1/1 passed; public key updated and GitHub secret configured after authorization | Working tree |
+| S2 | Add testable updater service and menu action | Root/worker | `Porto/Updates`, `PortoApp`, `PortPopoverView`, updater tests | DONE | Debug does not start/check production updater; enabled/disabled/state tests pass; menu action has source/accessibility coverage | Fresh focused tests: 10/10 passed; Debug build and exact app launch succeeded with no network handles or child processes; visual menu inspection was unavailable for the menu-bar-only surface | Working tree |
+| S3 | Add safe appcast wrapper and shell tests | Parfit/Root | `scripts/generate-sparkle-appcast.sh`, wrapper tests, `scripts/ci.sh` | DONE | stdin-only key path, validation/failure cases, CI hook pass | `zsh -n` passed; focused wrapper test passed; `git diff --check` passed; worker also reported `./scripts/ci.sh` with 174 XCTest cases and Debug build success | Working tree |
+| S4 | Extend unsigned tag workflow | Dewey/Root | `.github/workflows/unsigned-release.yml` | DONE | version/tool/archive/appcast checks are encoded; workflow not run or published | YAML parse passed; extracted workflow shell blocks passed `bash -n`; `git diff --check` passed; no workflow run or GitHub mutation | Working tree |
+| S5 | Document update operations and trust boundary | Bernoulli/Root | `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, base spec | DONE | user/maintainer/security docs align with implementation and deferred release steps | Worker ran `git diff --check`, Markdown fence sanity checks, targeted stale/overclaiming searches, and verified its four-file scope | Working tree |
+| S6 | Prepare bridge release and publish | Root | version/key/secret/tag/release acceptance | IN_PROGRESS | v1.0.2/build 3 bridge is locally packaged and signed appcast verified; publish and post-publish inspection remain | Keychain export corrected; local ZIP/checksum and Sparkle appcast/archive signatures verified; tag/workflow pending | Working tree |

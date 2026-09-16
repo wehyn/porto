@@ -21,6 +21,20 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Verify tag and project version contract
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_marketing_version="$(awk '/^[[:space:]]+MARKETING_VERSION:/{gsub(/["'"'"']/, "", $2); print $2; exit}' project.yml)"
+          [[ -n "$project_marketing_version" ]] || {
+            echo "MARKETING_VERSION is missing from project.yml" >&2
+            exit 1
+          }
+          [[ "$tag_version" == "$project_marketing_version" ]] || {
+            echo "Tag version $tag_version does not match project MARKETING_VERSION $project_marketing_version" >&2
+            exit 1
+          }
+
       - name: Select Xcode 26.6
         run: sudo xcode-select --switch /Applications/Xcode_26.6.app
 
@@ -32,12 +46,105 @@ jobs:
           PORTO_EXPECTED_XCODE_BUILD: 17F113
         run: ./scripts/package-unsigned.sh
 
+      - name: Verify package and stage Sparkle archive
+        run: |
+          set -euo pipefail
+
+          package_build_root="$GITHUB_WORKSPACE/.build/PortoRelease"
+          app_path="$package_build_root/Build/Products/Release/Porto.app"
+          info_plist="$app_path/Contents/Info.plist"
+          [[ -f "$info_plist" ]] || {
+            echo "Built Porto Info.plist is missing: $info_plist" >&2
+            exit 1
+          }
+
+          project_marketing_version="$(awk '/^[[:space:]]+MARKETING_VERSION:/{gsub(/["'"'"']/, "", $2); print $2; exit}' project.yml)"
+          project_build_version="$(awk '/^[[:space:]]+CURRENT_PROJECT_VERSION:/{gsub(/["'"'"']/, "", $2); print $2; exit}' project.yml)"
+          bundle_marketing_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")"
+          bundle_build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist")"
+          [[ "$bundle_marketing_version" == "$project_marketing_version" ]] || {
+            echo "Built CFBundleShortVersionString $bundle_marketing_version does not match project MARKETING_VERSION $project_marketing_version" >&2
+            exit 1
+          }
+          [[ "$bundle_build_version" == "$project_build_version" ]] || {
+            echo "Built CFBundleVersion $bundle_build_version does not match project CURRENT_PROJECT_VERSION $project_build_version" >&2
+            exit 1
+          }
+
+          placeholder_public_key='HUZtDQNJwxM3OCnFyYF2zRsUBgD2fnJ5EoZORDfnfHk='
+          public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$info_plist")"
+          [[ "$public_key" != "$placeholder_public_key" ]] || {
+            echo "Built SUPublicEDKey is still the repository placeholder; refusing to publish" >&2
+            exit 1
+          }
+
+          release_zip="$GITHUB_WORKSPACE/dist/Porto-${project_marketing_version}-macOS-universal.zip"
+          checksum_path="$release_zip.sha256"
+          [[ -f "$release_zip" ]] || {
+            echo "Version-matching release ZIP is missing: $release_zip" >&2
+            exit 1
+          }
+          [[ -f "$checksum_path" ]] || {
+            echo "Release checksum is missing: $checksum_path" >&2
+            exit 1
+          }
+          (
+            cd "${release_zip%/*}"
+            shasum -a 256 -c "${checksum_path##*/}"
+          )
+
+          sparkle_artifacts="$package_build_root/SourcePackages/artifacts"
+          [[ -d "$sparkle_artifacts" ]] || {
+            echo "Sparkle package artifacts are missing under $sparkle_artifacts" >&2
+            exit 1
+          }
+          sparkle_tool="$(find "$sparkle_artifacts" -type f -name generate_appcast -perm -111 -print -quit)"
+          [[ -n "$sparkle_tool" ]] || {
+            echo "Resolved Sparkle generate_appcast tool was not found under $sparkle_artifacts" >&2
+            exit 1
+          }
+          sparkle_tools_dir="${sparkle_tool%/*}"
+
+          staging_dir="$(mktemp -d "$RUNNER_TEMP/porto-sparkle.XXXXXX")"
+          cp -- "$release_zip" "$staging_dir/"
+          [[ "$(find "$staging_dir" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" == 1 ]] || {
+            echo "Sparkle staging directory must contain exactly one release ZIP" >&2
+            exit 1
+          }
+
+          {
+            echo "PORTO_RELEASE_ZIP=$release_zip"
+            echo "PORTO_RELEASE_CHECKSUM=$checksum_path"
+            echo "PORTO_SPARKLE_STAGING=$staging_dir"
+            echo "PORTO_SPARKLE_TOOLS_DIR=$sparkle_tools_dir"
+          } >> "$GITHUB_ENV"
+
+      - name: Generate signed Sparkle appcast
+        env:
+          PORTO_SPARKLE_ED_KEY: ${{ secrets.PORTO_SPARKLE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "${PORTO_SPARKLE_ED_KEY:-}" ]] || {
+            echo "PORTO_SPARKLE_ED_KEY is empty; refusing to publish" >&2
+            exit 1
+          }
+          export SPARKLE_DOWNLOAD_URL_PREFIX="https://github.com/wehyn/porto/releases/download/$GITHUB_REF_NAME/"
+          export SPARKLE_TOOLS_DIR="$PORTO_SPARKLE_TOOLS_DIR"
+
+          set +x
+          if ! printf '%s' "$PORTO_SPARKLE_ED_KEY" | ./scripts/generate-sparkle-appcast.sh "$PORTO_SPARKLE_STAGING"; then
+            set -x
+            exit 1
+          fi
+          set -x
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/Porto-*-macOS-universal.zip \
-            dist/Porto-*.sha256 \
+            "$PORTO_RELEASE_ZIP" \
+            "$PORTO_RELEASE_CHECKSUM" \
+            "$PORTO_SPARKLE_STAGING/appcast.xml" \
             --title "Porto $GITHUB_REF_NAME" \
             --generate-notes

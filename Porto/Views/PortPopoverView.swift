@@ -31,6 +31,7 @@ struct PortPopoverView: View {
 
     @ObservedObject var monitor: PortMonitor
     @ObservedObject var presentationObserver: MenuPresentationObserver
+    @ObservedObject var updater: PortoUpdater
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openWindow) private var openWindow
 
@@ -125,6 +126,11 @@ struct PortPopoverView: View {
     private var overflowMenu: some View {
         Menu {
             Button("Settings…") { openSettings() }
+            Button("Check for Updates…") { updater.checkForUpdates() }
+                .disabled(!updater.canCheckForUpdates)
+                .help("Check for available Porto updates")
+                .accessibilityLabel("Check for Updates")
+                .accessibilityHint("Checks whether a newer version of Porto is available")
             Divider()
             Button("About Porto") {
                 NSApp.activate(ignoringOtherApps: true)

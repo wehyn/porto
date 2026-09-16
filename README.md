@@ -25,6 +25,20 @@ Releases are unsigned and unnotarized developer builds. Verify the published
 SHA-256 checksum. On first launch, macOS may require **System Settings →
 Privacy & Security → Open Anyway**.
 
+Release builds periodically check the stable HTTPS Sparkle feed at
+<https://github.com/wehyn/porto/releases/latest/download/appcast.xml>. Sparkle
+uses signed feed and archive metadata for update verification, while its
+standard UI asks before downloading and installing an update. You can also
+choose **Check for Updates…** from Porto's menu-bar menu. If the feed is
+temporarily unavailable, download the latest release manually from GitHub and
+follow the Gatekeeper guidance above.
+
+The first Sparkle-enabled bridge is Porto 1.0.2. Existing Porto 1.0.1
+installations need a one-time manual installation of that bridge release before
+they can receive later updates; Porto 1.0.1 has no updater code. Sparkle
+archive signing is separate from Apple's code signing and notarization: Porto
+releases remain unsigned and unnotarized developer builds.
+
 ## Build from source
 
 Requirements: macOS 26+, Xcode 26, and XcodeGen 2.46.0 or compatible.

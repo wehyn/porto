@@ -11,3 +11,4 @@ fi
 xcodegen generate
 xcodebuild -project Porto.xcodeproj -scheme Porto -destination 'platform=macOS' test CODE_SIGNING_ALLOWED=NO
 xcodebuild -project Porto.xcodeproj -scheme Porto -configuration Debug -destination 'platform=macOS' build CODE_SIGNING_ALLOWED=NO
+scripts/tests/generate-sparkle-appcast-test.sh
