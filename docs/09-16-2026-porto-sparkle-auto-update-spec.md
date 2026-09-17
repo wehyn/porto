@@ -1,8 +1,8 @@
 # Porto Sparkle Automatic Update Specification
 
-Status: approved design; implementation pending
+Status: implemented; v1.0.2 bridge release verified; end-to-end update acceptance pending
 
-Last updated: 2026-09-16
+Last updated: 2026-09-17
 
 ## 1. Decision
 
