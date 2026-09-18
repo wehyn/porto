@@ -98,7 +98,7 @@ action.
 44. As a Porto user, I want remote Force Kill to use only the configured SSH user's permissions, so that Porto never silently escalates privileges.
 45. As a Porto user, I want remote actions available for listeners and connections, so that I can stop the process regardless of which kind of socket row exposed it.
 46. As a Porto user, I want rows without a remote PID or owner to show disabled controls, so that Porto never tries to kill a process using only a port number.
-47. As a Porto user, I want Porto to revalidate the PID, process name, local port, and socket owner before every remote signal, so that a stale row cannot terminate a replacement process.
+47. As a Porto user, I want Porto to revalidate the PID, process name, every represented local port/transport, and all socket identities before every remote signal, so that a stale row cannot terminate a replacement process.
 48. As a Porto user, I want termination canceled when remote identity changes, so that Porto fails safely instead of guessing which process to kill.
 49. As a Porto user, I want termination canceled when the profile is disabled, deleted, or no longer selected, so that actions cannot escape their original target.
 50. As a Porto user, I want only one scan or termination workflow active at a time, so that remote commands remain bounded and results cannot race each other.
@@ -276,7 +276,8 @@ action.
   `doas`, a privileged helper, a remote agent, or a remote service installation.
 
 - Remote revalidation must confirm the same target profile, PID, process name,
-  local port, and socket ownership represented by the row. If the process has
+  every represented local port/transport, and all socket identities represented
+  by the row. If the process has
   exited, the socket disappeared, the owner changed, the process name changed,
   the profile was disabled, or the selected target changed, Porto aborts the
   signal attempt and requests or permits a fresh scan.

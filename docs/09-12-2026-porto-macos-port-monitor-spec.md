@@ -56,8 +56,11 @@ V1 is acceptable only when all of the following are true:
 - Bound, unconnected UDP sockets, presented as listeners because UDP has no listening state.
 - TCP sockets with a remote endpoint, including established and transitional states, presented as connections.
 - Connected UDP sockets with a remote endpoint, presented as connections.
-- Grouping by activity kind, transport protocol, local port, and process, with
-  Docker-published remote listeners coalesced by container identity and an
+- Process-row aggregation by activity kind and verified owner identity. Normal
+  identified local and remote rows merge all represented local ports and
+  TCP/UDP transports for that activity; a process may therefore appear once
+  in listeners and once in connections. Docker-published remote rows retain a
+  separate coalescing path keyed by validated container identity and an
   ordered published host-port list.
 - A compact SwiftUI menu-bar popover.
 - Automatic and manual refresh.
@@ -80,11 +83,20 @@ V1 is acceptable only when all of the following are true:
 
 - **Local endpoint:** The address and port on this Mac, shown to the left of `->` in `lsof` output or as the only endpoint for an unconnected socket.
 - **Remote endpoint:** The address and port to the right of `->`.
-- **Local port:** The numeric port parsed from the local endpoint. This is the displayed and grouped port; a Docker row may display an ordered list of matching published host ports. For an outgoing connection it can be ephemeral.
+- **Local port:** The numeric port parsed from the local endpoint. A process
+  row may display an ordered list of represented local ports; a Docker row may
+  display an ordered list of matching published host ports. For an outgoing
+  connection a local port can be ephemeral.
 - **Listener:** A TCP socket whose state is `LISTEN`, or a UDP socket with a local endpoint and no remote endpoint.
 - **Connection:** A non-`LISTEN` TCP socket with local and remote endpoints, or a UDP socket with both endpoints.
 - **Socket record:** One parsed `lsof` file set.
-- **Row:** Socket records grouped by activity kind, protocol, local port, and process origin; Docker-published remote listeners with a usable container ID are then coalesced by target, activity kind, and container ID, retaining an ordered list of published host ports.
+- **Row:** A visible activity row. Normal identified local and remote rows
+  aggregate socket records by activity kind and verified owner identity across
+  all represented local ports and TCP/UDP transports. Listener and connection
+  rows remain separate. Ownerless rows and ambiguous Docker rows remain
+  socket-granular and non-actionable. Docker-published rows with a usable
+  container ID use the separate target/activity/container identity path and
+  retain an ordered list of published host ports.
 - **Process identity:** PID plus process start time obtained from the macOS process API. PID or process name alone is unsafe.
 - **Visible:** The popover is actually presented, not merely that Porto is running or its menu-bar item exists.
 - **Target:** Either This Mac or one literal alias discovered from the user's `~/.ssh/config`.
@@ -117,6 +129,8 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 ### 5.3 Unified activity list and empty state
 
 - Listeners appear first in one list, with active connections in a collapsed section by default.
+- `Connections (N)` counts visible grouped connection rows. Endpoints and
+  represented sockets remain inside those rows and are not counted as rows.
 - Rows sort by the first local port ascending, process name case-insensitively, TCP before UDP, then PID ascending across both activity kinds.
 - An empty list says `No ports found`.
 - A first load with no snapshot shows one progress indicator without a persistent status sentence, not a false empty state.
@@ -211,37 +225,51 @@ struct PortProcess: Identifiable, Equatable, Sendable {
 }
 ```
 
-`PortProcess.localPorts` and `PortProcess.transports` are ordered, unique lists.
-Local and non-Docker remote rows continue to contain one local port and one
-transport, while Docker rows may retain every published host port and both TCP
-and UDP after logical coalescing. `PortProcess.id` is a stable serialization of
-activity kind, transport(s), local port(s), and origin. Local rows include
-process start time; a missing local identity uses a scan-generation-scoped
-fallback and produces a non-actionable row. Remote rows are target-scoped and
-use the Linux PID plus normalized name, socket cookie, inode, or a canonical
-endpoint tuple. Docker rows with a usable container ID instead use the target,
-activity kind, and container ID; the changing port list is not part of that
-identity. A remote PID is never treated as a macOS `ProcessIdentity`. It can
-enable remote process control only when paired with the target-scoped socket
-identity and passes full remote revalidation. A Docker row uses a validated
-container ID instead; its display name and any Docker host PID can never enable
-or target termination.
+`PortProcess.localPorts` and `PortProcess.transports` are ordered, unique lists
+for every grouped row. Normal identified local and remote rows contain every
+represented local port and TCP/UDP transport for one activity kind. Ownerless
+rows and ambiguous Docker rows remain socket-granular, with one represented
+socket identity and no action target. Docker rows with a usable container ID
+may retain every matching published host port and both TCP and UDP after the
+separate container coalescing path. `PortProcess.id` is a stable serialization
+of activity kind and target-scoped owner identity; changing visible ports,
+transports, endpoints, or socket sets must not change a normal process-row ID.
+Local rows include process start time; a missing local identity uses a
+scan-generation-scoped fallback and produces a non-actionable row. Remote
+identified rows use the target ID, activity kind, Linux PID, and normalized
+process name, and retain all validated remote socket identities represented by
+the row. A remote PID is never treated as a macOS `ProcessIdentity`; it can
+enable remote process control only with the target-scoped socket identities and
+full remote revalidation. A Docker row with a usable ID instead uses the
+target, activity kind, and validated container ID; its changing port list,
+display name, and any Docker host PID can never enable or target termination.
 
-The preliminary socket grouping key is:
+The preliminary socket deduplication key is:
 
 ```text
 activity kind + transport protocol + local port + process origin
 ```
 
-Consequences:
+After preliminary deduplication and identity/metadata enrichment, apply one
+final process-row aggregation pass. Its normal-process key is activity kind
+plus verified owner identity and safe target/source metadata; it excludes
+local port, transport, endpoint, and socket identity. This key is target
+scoped and must never use a display name alone. Consequences:
 
 - IPv4 and IPv6 sockets with the same key become one row.
 - Duplicate endpoint-and-state observations are removed. State remains attached to its endpoint so grouped sockets with different states are represented accurately.
 - Listener and connection records on the same local port remain separate.
-- TCP and UDP on the same local port remain separate for local and non-Docker remote rows; Docker rows with a usable container ID aggregate them, aggregate all matching host ports for that container, and retain ordered local-port and protocol lists for display, accessibility, and help text.
-- Docker rows without a usable container ID remain visible at socket-level granularity, are labeled only when metadata supplies a truthful name, and are not actionable as container targets.
-- The same process and port can appear in both sections.
-- Termination state is keyed by `ProcessIdentity` because a signal affects the process, not one socket.
+- Normal identified local and remote rows merge TCP and UDP and all represented
+  local ports within one activity kind. The same owner may still produce one
+  listener row and one connection row.
+- Docker rows with a usable container ID separately aggregate all matching
+  host ports and protocols for that target and activity kind. Docker rows
+  without a usable ID, or with ambiguous metadata, remain visible at
+  socket-level granularity and are not actionable as container targets.
+- Ownerless normal rows remain separate even when display names match. Same-
+  name processes with different verified identities remain separate.
+- Termination state is keyed by the verified process/container identity because
+  a signal affects the owner, not one socket.
 
 ## 7. Scanner contract
 
@@ -290,7 +318,21 @@ The executable URL is fixed in code and never contains user-controlled text.
 - TCP `LISTEN` is a listener. Other TCP records require a remote endpoint and are connections.
 - UDP with a remote endpoint is a connection; UDP without one is a listener.
 - Normalize protocol and state to uppercase.
-- During byte parsing, deduplicate into a preliminary dictionary keyed by activity kind, protocol, local port, and PID instead of building an unbounded flat socket list. For local rows, replace bare PID with `ProcessIdentity`; remote rows retain a target-scoped owner or socket identity. After Docker metadata is parsed, rows with a usable container ID are coalesced by target, activity kind, and container ID; the row accumulates each matching host port, while rows without that ID retain socket-level identity.
+- During byte parsing, deduplicate into a preliminary dictionary keyed by
+  activity kind, protocol, local port, and owner/socket identity instead of
+  building an unbounded flat socket list. For local rows, replace bare PID
+  with `ProcessIdentity`; remote rows retain a target-scoped owner or socket
+  identity. After Docker metadata is parsed, rows with a usable container ID
+  use the separate target/activity/container coalescing path; rows without a
+  usable or unambiguous ID retain socket-level identity. Then perform the
+  final process-row aggregation: normal identified local and remote rows merge
+  across represented local ports and TCP/UDP transports within each activity
+  kind. Listener and connection rows never merge.
+- For remote targets, apply common-port and owner-visibility filtering to the
+  socket/preliminary records before UI process-row aggregation. Publish the
+  resulting visible grouped snapshot. Retain the grouped pre-visibility rows
+  separately for target-scoped revalidation so a visible aggregate can be
+  checked against every represented socket and identity before signaling.
 - Deduplicate endpoint observations by normalized endpoint text and socket state, then sort them before publishing so unchanged scans compare equal.
 
 ### 7.4 Process identity enrichment
@@ -622,6 +664,11 @@ Fixtures must cover:
 - TCP and UDP sharing a local port.
 - Listener and connection sharing process and port.
 - Same port owned by different PIDs.
+- One identified owner across multiple local ports and TCP/UDP transports
+  produces one row per activity kind; listener and connection rows remain
+  separate.
+- Same-name processes with different verified PIDs remain separate.
+- Ownerless rows and ambiguous Docker rows remain socket-granular and locked.
 - Duplicate endpoints and multiple states.
 - NUL-delimited process and file boundaries.
 - Missing, repeated, unknown, out-of-order, invalid UTF-8, and malformed fields.
@@ -658,6 +705,11 @@ Fixtures are sanitized and contain no user-specific public IPs or process data.
   cache reuse/expiry, per-target cache retention, stale-result suppression,
   bounded failure backoff, remote process/container termination guards, and
   cancellation-safe signal workflows.
+- Normal remote listener grouping for one `tailscaled` owner across ports
+  38832, 41641, and 49361; normal identified multi-port connection grouping;
+  same-name/different-PID separation; ownerless and ambiguous-Docker
+  socket-granular locking; stable IDs when visible ports change; and grouped
+  connection-count semantics.
 
 ### 15.3 Termination tests
 
@@ -740,13 +792,21 @@ shown in one ordered row, that TCP and UDP expose a combined protocol summary,
 that ports 80, 1455, 2283, and 6565 are not repeated, and that different
 containers and listener/connection activity remain separate.
 
+Also verify that a normal remote `tailscaled` owner on listener ports 38832,
+41641, and 49361 appears as one listener row, and that an identified process
+with multiple connection ports appears as one connection row. Same-name
+processes with different PIDs remain separate. Ownerless sockets and
+ambiguous Docker rows remain separate, locked rows. Changing port visibility
+does not change a normal process-row ID, and `Connections (N)` equals the
+number of visible grouped connection rows rather than the number of endpoints.
+
 ## 16. Acceptance traceability
 
 | ID | Release requirement | Verification |
 | --- | --- | --- |
 | AC-01 | Menu-bar-only app with no main window or Dock presence | Built-app manual test |
 | AC-02 | Listeners appear by default and connections remain collapsed until expanded | UI and manual tests |
-| AC-03 | TCP/UDP classification and grouping follow Sections 4 and 7 | Parser fixtures |
+| AC-03 | TCP/UDP classification, process-wide grouping, Docker identity boundaries, and grouped connection counts follow Sections 4 and 7 | Parser/scanner fixtures and UI/manual tests |
 | AC-04 | Immediate open scan and adaptive target/power-aware visible-only refresh | Cadence clock tests and runtime observation |
 | AC-05 | One total Porto-owned `lsof` or SSH child; one normal scan and one coalesced refresh maximum | Concurrency tests and Activity Monitor |
 | AC-06 | Failure retains valid snapshot; successful empty scan clears it | Scanner tests |
