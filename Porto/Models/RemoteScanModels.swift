@@ -112,12 +112,14 @@ struct TargetMonitorState: Sendable, Equatable {
     var diagnostics: ScanDiagnostics?
     var failure: PortScanFailure?
     var consecutiveFailures: Int
+    var consecutiveUnchangedSuccesses: Int
 
     static let empty = TargetMonitorState(
         snapshot: nil,
         lastSuccess: nil,
         diagnostics: nil,
         failure: nil,
-        consecutiveFailures: 0
+        consecutiveFailures: 0,
+        consecutiveUnchangedSuccesses: 0
     )
 }
