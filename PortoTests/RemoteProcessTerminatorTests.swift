@@ -32,7 +32,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(stopResult, .exited)
-        XCTAssertEqual(operations, [.scan, .signal(.term, pid: 42), .scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true), .signal(.term, pid: 42), .scan(includeDockerMetadata: true)])
     }
 
     func testStopStopsPollingAtInjectedGraceDeadline() async throws {
@@ -78,7 +78,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(result, .failed(.revalidationFailed))
-        XCTAssertEqual(operations, [.scan, .signal(.term, pid: 42)])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true), .signal(.term, pid: 42)])
     }
 
     func testForceKillFailsClosedWhenPollingTimesOutBeforeRevalidation() async throws {
@@ -99,7 +99,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(result, .failed(.revalidationFailed))
-        XCTAssertEqual(operations, [.scan, .signal(.kill, pid: 42)])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true), .signal(.kill, pid: 42)])
     }
 
     func testStopRejectsSamePIDAndNameWithDifferentSocketIdentity() async throws {
@@ -117,7 +117,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let result = await terminator.stop(row: row)
         let operations = await runner.operations()
         XCTAssertEqual(result, .failed(.staleTarget))
-        XCTAssertEqual(operations, [.scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
     }
 
     func testDockerStopUsesContainerSignalForPIDLessMultiPortRow() async throws {
@@ -154,7 +154,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
         XCTAssertEqual(result, .exited)
         XCTAssertEqual(operations, [
-            .scan, .signalContainer(.term, containerID: "0123456789ab"), .scan
+            .scan(includeDockerMetadata: true), .signalContainer(.term, containerID: "0123456789ab"), .scan(includeDockerMetadata: true)
         ])
     }
 
@@ -171,7 +171,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(result, .failed(.revalidationFailed))
-        XCTAssertEqual(operations, [.scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
     }
 
     func testDockerMetadataLossDuringPostTermPollingKeepsForceKillAvailable() async throws {
@@ -187,7 +187,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(result, .forceKillAvailable)
-        XCTAssertEqual(operations, [.scan, .signalContainer(.term, containerID: "0123456789ab"), .scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true), .signalContainer(.term, containerID: "0123456789ab"), .scan(includeDockerMetadata: true)])
     }
 
     func testForceKillWithMissingDockerMetadataNeverSignalsAHostPID() async throws {
@@ -203,7 +203,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         let operations = await runner.operations()
 
         XCTAssertEqual(result, .failed(.revalidationFailed))
-        XCTAssertEqual(operations, [.scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
     }
 
     func testDockerPermissionFailureIsClearAndNeverFallsBackToHostPID() async throws {
@@ -237,7 +237,7 @@ final class RemoteProcessTerminatorTests: XCTestCase {
 
         XCTAssertEqual(result, .failed(.dockerPermissionDenied))
         XCTAssertEqual(operations, [
-            .scan, .signalContainer(.term, containerID: "0123456789ab")
+            .scan(includeDockerMetadata: true), .signalContainer(.term, containerID: "0123456789ab")
         ])
     }
 

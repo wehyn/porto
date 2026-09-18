@@ -17,7 +17,7 @@ final class SSHCommandRunnerTests: XCTestCase {
         )
 
         let targetProfile = profile(host: "prod.example", username: "remote-user")
-        let result = await runner.run(profile: targetProfile, operation: .scan)
+        let result = await runner.run(profile: targetProfile, operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(SSHCommandRunner.executableURL.path, "/usr/bin/ssh")
         XCTAssertNil(result.failure)
@@ -39,7 +39,7 @@ final class SSHCommandRunnerTests: XCTestCase {
             environment: ["PORTO_RUNNER_TEST": "success"]
         )
 
-        let result = await runner.run(profile: profile(), operation: .scan)
+        let result = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
 
         XCTAssertNil(result.failure)
         XCTAssertEqual(result.stdout, Data("socket output\n".utf8))
@@ -52,16 +52,16 @@ final class SSHCommandRunnerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
         let slowProfile = profile(host: "slow")
-        let firstTask = Task { await runner.run(profile: slowProfile, operation: .scan) }
+        let firstTask = Task { await runner.run(profile: slowProfile, operation: .scan(includeDockerMetadata: true)) }
         try await Task.sleep(for: .milliseconds(50))
 
-        let secondResult = await runner.run(profile: profile(), operation: .scan)
+        let secondResult = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
         firstTask.cancel()
         let firstResult = await firstTask.value
 
         XCTAssertEqual(secondResult.failure, .busy)
         XCTAssertEqual(firstResult.failure, .cancelled)
-        let followUp = await runner.run(profile: profile(), operation: .scan)
+        let followUp = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
         XCTAssertNil(followUp.failure)
     }
 
@@ -73,8 +73,8 @@ final class SSHCommandRunnerTests: XCTestCase {
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .milliseconds(500))
 
         let slowProfile = profile(host: "slow")
-        let result = await runner.run(profile: slowProfile, operation: .scan)
-        let followUp = await runner.run(profile: profile(), operation: .scan)
+        let result = await runner.run(profile: slowProfile, operation: .scan(includeDockerMetadata: true))
+        let followUp = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(result.failure, .timedOut)
         XCTAssertEqual(result.terminationReason, .signal)
@@ -86,12 +86,12 @@ final class SSHCommandRunnerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
         let slowProfile = profile(host: "slow")
-        let task = Task { await runner.run(profile: slowProfile, operation: .scan) }
+        let task = Task { await runner.run(profile: slowProfile, operation: .scan(includeDockerMetadata: true)) }
         try await Task.sleep(for: .milliseconds(50))
 
         task.cancel()
         let result = await task.value
-        let followUp = await runner.run(profile: profile(), operation: .scan)
+        let followUp = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(result.failure, .cancelled)
         XCTAssertTrue(result.wasCancelled)
@@ -103,11 +103,11 @@ final class SSHCommandRunnerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
         let runner = SSHCommandRunner(executableURL: fixture, timeout: .seconds(2))
         let slowProfile = profile(host: "slow")
-        let task = Task { await runner.run(profile: slowProfile, operation: .scan) }
+        let task = Task { await runner.run(profile: slowProfile, operation: .scan(includeDockerMetadata: true)) }
         try await Task.sleep(for: .milliseconds(50))
 
         await runner.cancelActive()
-        let followUp = await runner.run(profile: profile(), operation: .scan)
+        let followUp = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
         let result = await task.value
 
         XCTAssertEqual(result.failure, .cancelled)
@@ -130,8 +130,8 @@ final class SSHCommandRunnerTests: XCTestCase {
             timeout: .seconds(2)
         )
 
-        let stdoutResult = await stdoutRunner.run(profile: profile(host: "overflow-stdout"), operation: .scan)
-        let stderrResult = await stderrRunner.run(profile: profile(host: "overflow-stderr"), operation: .scan)
+        let stdoutResult = await stdoutRunner.run(profile: profile(host: "overflow-stdout"), operation: .scan(includeDockerMetadata: true))
+        let stderrResult = await stderrRunner.run(profile: profile(host: "overflow-stderr"), operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(stdoutResult.failure, .outputTooLarge(stream: .stdout))
         XCTAssertLessThanOrEqual(stdoutResult.stdout.count, 1_024)
@@ -144,16 +144,16 @@ final class SSHCommandRunnerTests: XCTestCase {
             executableURL: URL(fileURLWithPath: "/definitely/not-a-porto-executable")
         )
 
-        let launchFailure = await runner.run(profile: profile(), operation: .scan)
+        let launchFailure = await runner.run(profile: profile(), operation: .scan(includeDockerMetadata: true))
         var leadingDashProfile = profile()
         leadingDashProfile.host = "-oProxyCommand=bad"
         var controlCharacterProfile = profile()
         controlCharacterProfile.host = "bad\nhost"
         var emptyProfile = profile()
         emptyProfile.host = ""
-        let leadingDash = await runner.run(profile: leadingDashProfile, operation: .scan)
-        let controlCharacter = await runner.run(profile: controlCharacterProfile, operation: .scan)
-        let empty = await runner.run(profile: emptyProfile, operation: .scan)
+        let leadingDash = await runner.run(profile: leadingDashProfile, operation: .scan(includeDockerMetadata: true))
+        let controlCharacter = await runner.run(profile: controlCharacterProfile, operation: .scan(includeDockerMetadata: true))
+        let empty = await runner.run(profile: emptyProfile, operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(launchFailure.failure, .launchFailed)
         XCTAssertEqual(leadingDash.failure, .invalidProfile)
@@ -164,7 +164,7 @@ final class SSHCommandRunnerTests: XCTestCase {
     func testCustomPortAndIdentityPathRemainSeparateArgumentsWithoutReadingKey() throws {
         let targetProfile = profile(host: "[2001:db8::10]", username: "remote-user", port: 2200, identityFilePath: "/tmp/key with spaces")
 
-        let arguments = SSHCommandRunner.arguments(for: targetProfile, operation: .scan)
+        let arguments = SSHCommandRunner.arguments(for: targetProfile, operation: .scan(includeDockerMetadata: true))
 
         XCTAssertEqual(arguments, expectedArguments(profile: targetProfile, hostArgument: "2001:db8::10"))
         XCTAssertEqual(targetProfile.host, "[2001:db8::10]")
@@ -172,6 +172,28 @@ final class SSHCommandRunnerTests: XCTestCase {
         XCTAssertEqual(arguments?[separatorIndex], "--")
         XCTAssertEqual(arguments?[separatorIndex + 1], "2001:db8::10")
         XCTAssertFalse(arguments?.contains { $0.contains("PRIVATE") || $0.contains("BEGIN") } ?? true)
+    }
+
+    func testSocketOnlyScanUsesExactFixedCommandWithoutDocker() throws {
+        let arguments = try XCTUnwrap(
+            SSHCommandRunner.arguments(for: profile(), operation: .scan(includeDockerMetadata: false))
+        )
+
+        XCTAssertEqual(arguments.last, SSHCommandRunner.remoteSocketCommand)
+        XCTAssertEqual(
+            SSHCommandRunner.remoteSocketCommand,
+            "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e'"
+        )
+        XCTAssertFalse(arguments.last?.contains("docker ps") ?? true)
+    }
+
+    func testMetadataScanUsesExactFixedDockerCommand() throws {
+        let arguments = try XCTUnwrap(
+            SSHCommandRunner.arguments(for: profile(), operation: .scan(includeDockerMetadata: true))
+        )
+
+        XCTAssertEqual(arguments.last, SSHCommandRunner.remoteDockerCommand)
+        XCTAssertTrue(arguments.last?.contains("docker ps --format") ?? false)
     }
 
     func testSignalCommandsAreExactAndContainerIDsAreValidated() throws {
@@ -225,7 +247,7 @@ final class SSHCommandRunnerTests: XCTestCase {
             "-o", "ControlPath=none",
             "--",
             hostArgument ?? profile.host,
-            SSHCommandRunner.remoteCommand
+            SSHCommandRunner.remoteDockerCommand
         ]
         return arguments
     }

@@ -24,7 +24,7 @@ enum SSHCommandRunnerFailure: Sendable, Equatable {
 enum RemoteSSHSignal: Int32, Sendable, Equatable { case term = 15; case kill = 9 }
 
 enum RemoteSSHOperation: Sendable, Equatable {
-    case scan
+    case scan(includeDockerMetadata: Bool)
     case signal(RemoteSSHSignal, pid: Int32)
     case signalContainer(RemoteSSHSignal, containerID: String)
 }
@@ -50,7 +50,8 @@ actor SSHCommandRunner: SSHCommandRunning {
     static let stdoutLimit = 16 * 1024 * 1024
     static let stderrLimit = 256 * 1024
     static let timeout: Duration = .seconds(5)
-    static let remoteCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
+    static let remoteSocketCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e'"
+    static let remoteDockerCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
 
     private let executableURL: URL
     private let stdoutLimit: Int
@@ -89,7 +90,8 @@ actor SSHCommandRunner: SSHCommandRunning {
             "-o", "ControlMaster=no", "-o", "ControlPath=none", "--", sshHost(for: profile.host)
         ]
         switch operation {
-        case .scan: arguments.append(remoteCommand)
+        case let .scan(includeDockerMetadata):
+            arguments.append(includeDockerMetadata ? remoteDockerCommand : remoteSocketCommand)
         case let .signal(signal, pid):
             guard pid > 0 else { return nil }
             let name = signal == .term ? "TERM" : "KILL"

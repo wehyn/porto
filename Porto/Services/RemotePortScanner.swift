@@ -5,17 +5,25 @@ actor RemotePortScanner: PortSnapshotScanning {
     private let runner: any SSHCommandRunning
     private let outputParser: RemotePortOutputParser
     private let visibilityPolicy: PortVisibilityPolicy
+    private let dockerMetadataRefreshInterval: Duration
+    private let now: @Sendable () -> ContinuousClock.Instant
+    private var cachedDockerPortCatalog: DockerPortCatalog?
+    private var cachedDockerMetadataAt: ContinuousClock.Instant?
 
     init(
         profile: RemoteServerProfile,
         runner: any SSHCommandRunning = SSHCommandRunner(),
         parser: SsParser = SsParser(),
-        visibilityPolicy: PortVisibilityPolicy = .remoteFocused
+        visibilityPolicy: PortVisibilityPolicy = .remoteFocused,
+        dockerMetadataRefreshInterval: Duration = .seconds(30),
+        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock().now }
     ) {
         self.profile = profile
         self.runner = runner
         self.outputParser = RemotePortOutputParser(ssParser: parser)
         self.visibilityPolicy = visibilityPolicy
+        self.dockerMetadataRefreshInterval = dockerMetadataRefreshInterval
+        self.now = now
     }
 
     func scan(_ request: PortScanRequest) async -> PortScanOutcome {
@@ -24,7 +32,11 @@ actor RemotePortScanner: PortSnapshotScanning {
             return failure(.readFailed, request: request, diagnostics: .empty)
         }
 
-        let execution = await runner.run(profile: profile, operation: .scan)
+        let includeDockerMetadata = shouldRefreshDockerMetadata(for: request.trigger)
+        let execution = await runner.run(
+            profile: profile,
+            operation: .scan(includeDockerMetadata: includeDockerMetadata)
+        )
         let base = ScanDiagnostics(
             stdoutBytes: execution.stdout.count,
             stderrBytes: execution.stderr.count,
@@ -50,6 +62,10 @@ actor RemotePortScanner: PortSnapshotScanning {
 
         switch outputParser.parse(execution.stdout, targetID: request.targetID) {
         case let .success(parsed):
+            if includeDockerMetadata {
+                cachedDockerPortCatalog = parsed.dockerPorts
+                cachedDockerMetadataAt = now()
+            }
             let diagnostics = ScanDiagnostics(
                 stdoutBytes: execution.stdout.count,
                 stderrBytes: execution.stderr.count,
@@ -57,7 +73,10 @@ actor RemotePortScanner: PortSnapshotScanning {
                 skippedRecords: parsed.skippedRecords,
                 durationMilliseconds: execution.durationMilliseconds
             )
-            let dockerLabeledSnapshot = parsed.dockerPorts.applying(to: parsed.snapshot)
+            let dockerPorts = includeDockerMetadata
+                ? parsed.dockerPorts
+                : (cachedDockerPortCatalog ?? .empty)
+            let dockerLabeledSnapshot = dockerPorts.applying(to: parsed.snapshot)
             return .success(TargetedPortSnapshot(
                 targetID: request.targetID,
                 sessionGeneration: request.sessionGeneration,
@@ -68,6 +87,15 @@ actor RemotePortScanner: PortSnapshotScanning {
         case .failure:
             return failure(.malformedOutput, request: request, diagnostics: base)
         }
+    }
+
+    private func shouldRefreshDockerMetadata(for trigger: ScanTrigger) -> Bool {
+        guard trigger == .scheduled,
+              let cachedDockerMetadataAt,
+              now() < cachedDockerMetadataAt.advanced(by: dockerMetadataRefreshInterval) else {
+            return true
+        }
+        return false
     }
 
     func cancelActiveWork() async {

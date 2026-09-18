@@ -29,7 +29,72 @@ final class RemotePortScannerTests: XCTestCase {
         XCTAssertEqual(row.source, .remoteProcess)
         XCTAssertEqual(row.controlTarget, .remoteProcess(targetID: targetID, pid: 42))
         let operations = await runner.operations()
-        XCTAssertEqual(operations, [.scan])
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
+    }
+
+    func testPresentationThenScheduledSocketScanReusesDockerLabelsWithinThirtySeconds() async throws {
+        let fullOutput = dockerOutput(name: "web")
+        let socketOutput = socketOutput(processName: "ss-owner")
+        let clock = TestInstantBox()
+        let runner = SequencedStubSSHCommandRunner(results: [
+            execution(stdout: Data(fullOutput.utf8), status: 0),
+            execution(stdout: Data(socketOutput.utf8), status: 0)
+        ])
+        let scanner = RemotePortScanner(profile: profile, runner: runner, now: { clock.value })
+
+        let first = await scanner.scan(request(trigger: .presentation))
+        clock.advance(by: .seconds(29))
+        let second = await scanner.scan(request(trigger: .scheduled, generation: 2))
+
+        let operations = await runner.operations()
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .scan(includeDockerMetadata: false)
+        ])
+        XCTAssertEqual(try XCTUnwrap(success(first)).snapshot.listeners.first?.processName, "web")
+        XCTAssertEqual(try XCTUnwrap(success(second)).snapshot.listeners.first?.processName, "web")
+    }
+
+    func testExpiryAndManualTriggerForceFreshDockerMetadata() async throws {
+        let clock = TestInstantBox()
+        let runner = SequencedStubSSHCommandRunner(results: [
+            execution(stdout: Data(dockerOutput(name: "first").utf8), status: 0),
+            execution(stdout: Data(socketOutput(processName: "socket").utf8), status: 0),
+            execution(stdout: Data(dockerOutput(name: "second").utf8), status: 0)
+        ])
+        let scanner = RemotePortScanner(profile: profile, runner: runner, now: { clock.value })
+
+        _ = await scanner.scan(request(trigger: .presentation))
+        clock.advance(by: .seconds(30))
+        _ = await scanner.scan(request(trigger: .scheduled, generation: 2))
+        _ = await scanner.scan(request(trigger: .manual, generation: 3))
+
+        let operations = await runner.operations()
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .scan(includeDockerMetadata: true),
+            .scan(includeDockerMetadata: true)
+        ])
+    }
+
+    func testFailedSocketScanDoesNotReplaceCachedMetadata() async throws {
+        let runner = SequencedStubSSHCommandRunner(results: [
+            execution(stdout: Data(dockerOutput(name: "web").utf8), status: 0),
+            execution(stderr: Data("temporary failure".utf8), status: 1),
+            execution(stdout: Data(socketOutput(processName: "socket").utf8), status: 0)
+        ])
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+
+        let initial = await scanner.scan(request(trigger: .presentation))
+        let failed = await scanner.scan(request(trigger: .scheduled, generation: 2))
+        let recovered = await scanner.scan(request(trigger: .scheduled, generation: 3))
+
+        guard case .failure = failed else { return XCTFail("expected scheduled socket failure") }
+        XCTAssertEqual(try XCTUnwrap(success(initial)).snapshot.listeners.first?.processName, "web")
+        XCTAssertEqual(try XCTUnwrap(success(recovered)).snapshot.listeners.first?.processName, "web")
+        let operations = await runner.operations()
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .scan(includeDockerMetadata: false),
+            .scan(includeDockerMetadata: false)
+        ])
     }
 
     func testRemotePolicyHidesCommonServicePortsButKeepsCustomPorts() async throws {
@@ -336,6 +401,28 @@ final class RemotePortScannerTests: XCTestCase {
         return snapshot
     }
 
+    private func request(trigger: ScanTrigger, generation: UInt64 = 1) -> PortScanRequest {
+        PortScanRequest(
+            targetID: targetID,
+            sessionGeneration: generation,
+            scanGeneration: generation,
+            trigger: trigger
+        )
+    }
+
+    private func success(_ outcome: PortScanOutcome) -> TargetedPortSnapshot? {
+        guard case let .success(snapshot) = outcome else { return nil }
+        return snapshot
+    }
+
+    private func socketOutput(processName: String) -> String {
+        "tcp LISTEN 0 128 0.0.0.0:8080 0.0.0.0:* users:((\"\(processName)\",pid=42,fd=3)) ino:7 sk:cookie\n"
+    }
+
+    private func dockerOutput(name: String) -> String {
+        socketOutput(processName: "host") + "__PORTO_DOCKER__\n0123456789ab\t\(name)\t0.0.0.0:8080->8080/tcp\n"
+    }
+
     private func execution(stdout: Data = Data(), stderr: Data = Data(), status: Int32?) -> SSHCommandExecutionResult {
         SSHCommandExecutionResult(
             stdout: stdout,
@@ -410,4 +497,29 @@ private actor StubSSHCommandRunner: SSHCommandRunning {
 
     func cancelActive() async {}
     func operations() -> [RemoteSSHOperation] { requestedOperations }
+}
+
+private actor SequencedStubSSHCommandRunner: SSHCommandRunning {
+    private var results: [SSHCommandExecutionResult]
+    private var requestedOperations: [RemoteSSHOperation] = []
+
+    init(results: [SSHCommandExecutionResult]) {
+        self.results = results
+    }
+
+    func run(profile: RemoteServerProfile, operation: RemoteSSHOperation) async -> SSHCommandExecutionResult {
+        requestedOperations.append(operation)
+        return results.removeFirst()
+    }
+
+    func cancelActive() async {}
+    func operations() -> [RemoteSSHOperation] { requestedOperations }
+}
+
+private final class TestInstantBox: @unchecked Sendable {
+    var value = ContinuousClock().now
+
+    func advance(by duration: Duration) {
+        value = value.advanced(by: duration)
+    }
 }
