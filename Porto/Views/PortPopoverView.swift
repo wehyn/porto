@@ -42,7 +42,7 @@ struct PortPopoverView: View {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 12) {
                     activitySummary
-                    if monitor.isScanning && !monitor.hasSnapshot {
+                    if monitor.isInitialLoading {
                         scanningState
                     } else if !monitor.hasSnapshot, (monitor.scanError != nil || monitor.remoteFailure != nil) {
                         firstLoadErrorState
@@ -174,7 +174,7 @@ struct PortPopoverView: View {
                 .padding(.vertical, 8)
         } else {
             LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(monitor.listenerRows) { row in PortProcessRow(row: row, monitor: monitor) }
+                ForEach(monitor.listenerRows) { row in processRow(row) }
             }
         }
     }
@@ -184,7 +184,7 @@ struct PortPopoverView: View {
         if !monitor.connectionRows.isEmpty {
             DisclosureGroup(isExpanded: $monitor.connectionsExpanded) {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(monitor.connectionRows) { row in PortProcessRow(row: row, monitor: monitor) }
+                    ForEach(monitor.connectionRows) { row in processRow(row) }
                 }
                 .padding(.top, 4)
             } label: {
@@ -198,6 +198,18 @@ struct PortPopoverView: View {
                 )
             )
         }
+    }
+
+    private func processRow(_ row: PortProcess) -> some View {
+        PortProcessRow(
+            row: row,
+            targetDisplayName: monitor.selectedTarget.displayName,
+            terminationState: monitor.terminationState(for: row),
+            isOwnProcess: monitor.isOwnProcess(row),
+            isTerminationDisabled: monitor.isTerminationDisabled(for: row),
+            onStop: { monitor.requestStop(for: row) },
+            onForceKill: { monitor.requestForceKill(for: row) }
+        )
     }
 
     private var scanningState: some View {
@@ -283,17 +295,37 @@ private struct TargetSelectorControl: NSViewRepresentable {
     func updateNSView(_ button: NSPopUpButton, context: Context) {
         context.coordinator.parent = self
 
-        button.removeAllItems()
-        for target in targets {
-            button.addItem(withTitle: target.displayName)
-            button.lastItem?.representedObject = target.id.rawValue
+        let targetSignature = targets.map {
+            TargetSignature(id: $0.id.rawValue, displayName: $0.displayName)
         }
-        button.selectItem(withTitle: selection.displayName)
-        button.isEnabled = !isDisabled
+        if context.coordinator.targetSignature != targetSignature {
+            button.removeAllItems()
+            for target in targets {
+                button.addItem(withTitle: target.displayName)
+                button.lastItem?.representedObject = target.id.rawValue
+            }
+            context.coordinator.targetSignature = targetSignature
+            context.coordinator.selectionID = nil
+        }
+        let selectionID = selection.id.rawValue
+        if context.coordinator.selectionID != selectionID {
+            if let index = button.itemArray.firstIndex(where: { $0.representedObject as? String == selectionID }) {
+                button.selectItem(at: index)
+            }
+            context.coordinator.selectionID = selectionID
+        }
+        let enabled = !isDisabled
+        if context.coordinator.isEnabled != enabled {
+            button.isEnabled = enabled
+            context.coordinator.isEnabled = enabled
+        }
     }
 
     final class Coordinator: NSObject {
         var parent: TargetSelectorControl
+        var targetSignature: [TargetSignature]?
+        var selectionID: String?
+        var isEnabled: Bool?
 
         init(parent: TargetSelectorControl) {
             self.parent = parent
@@ -306,5 +338,10 @@ private struct TargetSelectorControl: NSViewRepresentable {
             }
             parent.selection = target
         }
+    }
+
+    struct TargetSignature: Equatable {
+        let id: String
+        let displayName: String
     }
 }

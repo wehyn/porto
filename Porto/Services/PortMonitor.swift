@@ -16,12 +16,12 @@ final class PortMonitor: ObservableObject {
     @Published private(set) var isStale = false
     @Published private(set) var scanError: ScanFailure?
     @Published private(set) var remoteFailure: RemoteScanFailure?
-    @Published private(set) var lastDiagnostics: ScanDiagnostics?
+    private(set) var lastDiagnostics: ScanDiagnostics?
     @Published private(set) var terminationStates: [ProcessIdentity: TerminationUIState] = [:]
     @Published private(set) var forceKillPrompt: PortProcess?
     @Published private(set) var selectedTarget: PortTarget = .local
     @Published var connectionsExpanded = false
-    @Published private(set) var nextRetrySeconds: Int?
+    private(set) var nextRetrySeconds: Int?
     @Published private(set) var profiles: [RemoteServerProfile] = []
     @Published private(set) var activeRemoteTerminationKey: String?
     @Published private(set) var remoteTerminationStates: [String: TerminationUIState] = [:]
@@ -557,7 +557,7 @@ final class PortMonitor: ObservableObject {
     private func cancelRemoteWorkAndClearState() {
         cancelActiveConnectionTest()
         cancelActiveScan()
-        isInitialLoading = false
+        if isInitialLoading { isInitialLoading = false }
         terminationTask?.cancel()
         // Keep the in-flight markers until each canceled task reaches its
         // completion handler. This is the cancellation barrier that prevents
@@ -597,13 +597,31 @@ final class PortMonitor: ObservableObject {
 
     private func publishSelectedTargetState() {
         let state = targetStates[selectedTarget.id] ?? .empty
-        listenerRows = state.snapshot?.listeners ?? []
-        connectionRows = state.snapshot?.connections ?? []
-        hasSnapshot = state.snapshot != nil
-        isStale = state.snapshot != nil && selectedTarget.isRemote
+        let newListeners = state.snapshot?.listeners ?? []
+        let newConnections = state.snapshot?.connections ?? []
+        let newHasSnapshot = state.snapshot != nil
+        let newStale = state.snapshot != nil && selectedTarget.isRemote
+        let newScanError: ScanFailure?
+        let newRemoteFailure: RemoteScanFailure?
+
+        if case let .local(error)? = state.failure {
+            newScanError = error
+        } else {
+            newScanError = nil
+        }
+        if case let .remote(error)? = state.failure {
+            newRemoteFailure = error
+        } else {
+            newRemoteFailure = nil
+        }
+
+        if listenerRows != newListeners { listenerRows = newListeners }
+        if connectionRows != newConnections { connectionRows = newConnections }
+        if hasSnapshot != newHasSnapshot { hasSnapshot = newHasSnapshot }
+        if isStale != newStale { isStale = newStale }
+        if scanError != newScanError { scanError = newScanError }
+        if remoteFailure != newRemoteFailure { remoteFailure = newRemoteFailure }
         lastDiagnostics = state.diagnostics
-        if case let .local(error)? = state.failure { scanError = error } else { scanError = nil }
-        if case let .remote(error)? = state.failure { remoteFailure = error } else { remoteFailure = nil }
     }
 
     private func requestRefresh(isManual: Bool = false, trigger: ScanTrigger = .scheduled) {
@@ -656,8 +674,8 @@ final class PortMonitor: ObservableObject {
         scanToken = token
         activeScanIsManual = isManual
         isScanning = true
-        if !hasSnapshot { isInitialLoading = true }
-        if selectedTarget.isRemote, hasSnapshot { isStale = true }
+        if targetStates[selectedTarget.id]?.snapshot == nil { isInitialLoading = true }
+        if selectedTarget.isRemote, hasSnapshot, !isStale { isStale = true }
         scanTask = Task { [weak self] in
             let outcome = await scanner.scan(request)
             guard let self else { return }
@@ -672,7 +690,7 @@ final class PortMonitor: ObservableObject {
         scanToken = nil
         scanTask = nil
         isScanning = false
-        isInitialLoading = false
+        if isInitialLoading { isInitialLoading = false }
         if finishedManual && !pendingManualRefresh { isManualRefreshing = false }
         let matches = request.targetID == selectedTarget.id
             && request.sessionGeneration == sessionGeneration && isPresented && !quitRequested
@@ -695,7 +713,7 @@ final class PortMonitor: ObservableObject {
                 }
                 targetStates[request.targetID] = state
                 publishSelectedTargetState()
-                isStale = false
+                if isStale { isStale = false }
                 clearTerminationStatesForMissingRows(in: targeted.snapshot, targetID: request.targetID)
                 retryDelay = cadenceDelay(
                     targetID: request.targetID,
@@ -710,7 +728,7 @@ final class PortMonitor: ObservableObject {
                     state.consecutiveFailures += 1
                     targetStates[request.targetID] = state
                     publishSelectedTargetState()
-                    isStale = hasSnapshot
+                    if isStale != hasSnapshot { isStale = hasSnapshot }
                     retryDelay = Self.backoffDelay(for: state.consecutiveFailures)
                 }
             case .success, .failure, .cancelled:
@@ -835,7 +853,10 @@ final class PortMonitor: ObservableObject {
             return
         }
         let identities = Set(snapshot.allRows.compactMap(\.localIdentity))
-        terminationStates = terminationStates.filter { identities.contains($0.key) }
+        let retainedTerminationStates = terminationStates.filter { identities.contains($0.key) }
+        if terminationStates != retainedTerminationStates {
+            terminationStates = retainedTerminationStates
+        }
         if let promptIdentity = forceKillPrompt?.localIdentity, !identities.contains(promptIdentity) { forceKillPrompt = nil }
     }
 

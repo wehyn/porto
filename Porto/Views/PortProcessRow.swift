@@ -2,7 +2,12 @@ import SwiftUI
 
 struct PortProcessRow: View {
     let row: PortProcess
-    @ObservedObject var monitor: PortMonitor
+    let targetDisplayName: String
+    let terminationState: TerminationUIState?
+    let isOwnProcess: Bool
+    let isTerminationDisabled: Bool
+    let onStop: () -> Void
+    let onForceKill: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -39,7 +44,7 @@ struct PortProcessRow: View {
             access = ""
         }
         let portLabel = row.localPorts.count == 1 ? "local port" : "local ports"
-        return "\(monitor.selectedTarget.displayName), \(process), \(transportSummary), \(portLabel) \(accessiblePortSummary), \(activity), \(endpoints)\(access)"
+        return "\(targetDisplayName), \(process), \(transportSummary), \(portLabel) \(accessiblePortSummary), \(activity), \(endpoints)\(access)"
     }
 
     private var portSummary: String {
@@ -79,12 +84,12 @@ struct PortProcessRow: View {
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Process identity unavailable; controls disabled")
                 .help("Porto could not verify this process identity, so process controls are disabled.")
-        } else if monitor.isOwnProcess(row) {
+        } else if isOwnProcess {
             Image(systemName: "nosign")
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Porto cannot stop itself")
                 .help("Porto cannot stop itself.")
-        } else if let state = monitor.terminationState(for: row) {
+        } else if let state = terminationState {
             switch state {
             case .inProgress:
                 ProgressView()
@@ -105,7 +110,7 @@ struct PortProcessRow: View {
 
     private var stopButton: some View {
         Button {
-            monitor.requestStop(for: row)
+            onStop()
         } label: {
             Image(systemName: "xmark")
                 .font(.caption.weight(.bold))
@@ -113,14 +118,14 @@ struct PortProcessRow: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(.secondary)
-        .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
+        .disabled(!row.isActionable || isTerminationDisabled)
         .accessibilityLabel("Stop \(row.processName)")
         .help("Send SIGTERM to \(controlTargetDescription). This can close all ports owned by the \(row.isDockerContainer ? "container" : "process").")
     }
 
     private var forceKillButton: some View {
         Button {
-            monitor.requestForceKill(for: row)
+            onForceKill()
         } label: {
             Image(systemName: "bolt.fill")
                 .font(.caption.weight(.bold))
@@ -128,7 +133,7 @@ struct PortProcessRow: View {
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.borderless)
-        .disabled(!row.isActionable || monitor.isTerminationDisabled(for: row))
+        .disabled(!row.isActionable || isTerminationDisabled)
         .accessibilityLabel("Force kill \(row.processName)")
         .help("Force kill \(controlTargetDescription). SIGKILL prevents cleanup and can lose unsaved work.")
     }

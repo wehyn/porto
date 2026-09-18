@@ -1,4 +1,5 @@
 import Darwin
+import Combine
 import Foundation
 import XCTest
 @testable import Porto
@@ -597,6 +598,57 @@ final class PortMonitorTests: XCTestCase {
         await waitUntil { await clock.waitingCount() == 1 }
         let secondDurations = await clock.requestedDurations()
         XCTAssertEqual(secondDurations, [.seconds(2), .seconds(5)])
+    }
+
+    func testUnchangedBackgroundScanDoesNotRepublishVisibleState() async {
+        let clock = ManualMonitorClock()
+        let snapshot = PortSnapshot(
+            listeners: [makeRow(pid: 9, port: 8080)],
+            connections: []
+        )
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: snapshot, diagnostics: zeroDiagnostics),
+            .success(
+                snapshot: snapshot,
+                diagnostics: ScanDiagnostics(
+                    stdoutBytes: 1,
+                    stderrBytes: 2,
+                    validRecords: 3,
+                    skippedRecords: 4,
+                    durationMilliseconds: 5
+                )
+            )
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+
+        let listeners = monitor.listenerRows
+        let connections = monitor.connectionRows
+        let hasSnapshot = monitor.hasSnapshot
+        let scanError = monitor.scanError
+        let remoteFailure = monitor.remoteFailure
+        var publicationCount = 0
+        let subscription = monitor.objectWillChange.sink { _ in publicationCount += 1 }
+        defer { subscription.cancel() }
+
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+
+        XCTAssertEqual(monitor.listenerRows, listeners)
+        XCTAssertEqual(monitor.connectionRows, connections)
+        XCTAssertEqual(monitor.hasSnapshot, hasSnapshot)
+        XCTAssertEqual(monitor.scanError, scanError)
+        XCTAssertEqual(monitor.remoteFailure, remoteFailure)
+        XCTAssertEqual(publicationCount, 0)
     }
 
     func testLowPowerLocalCadenceStartsAtTenSeconds() async {
