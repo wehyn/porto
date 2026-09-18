@@ -134,7 +134,62 @@ final class RemotePortScannerTests: XCTestCase {
         guard case let .success(snapshot) = outcome else { return XCTFail("expected success") }
         XCTAssertEqual(snapshot.snapshot.listeners.map(\.localPort), [8080])
         XCTAssertTrue(snapshot.snapshot.connections.isEmpty)
+        XCTAssertEqual(snapshot.revalidationSnapshot?.listeners.map(\.localPort), [22, 53, 80, 137, 8080])
+        XCTAssertEqual(snapshot.revalidationSnapshot?.listeners.first(where: { $0.localPort == 8080 })?.id,
+                       snapshot.snapshot.listeners.first?.id)
         XCTAssertEqual(snapshot.diagnostics.validRecords, 6)
+    }
+
+    func testSameProcessListenerPortsGroupWithAllTransportsAndSocketIdentities() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:38832 0.0.0.0:* users:((\"tailscaled\",pid=317,fd=3)) ino:38832 sk:tcp38832
+        udp UNCONN 0 0 0.0.0.0:41641 0.0.0.0:* users:((\"tailscaled\",pid=317,fd=4)) ino:41641 sk:udp41641
+        udp UNCONN 0 0 0.0.0.0:49361 0.0.0.0:* users:((\"tailscaled\",pid=317,fd=5)) ino:49361 sk:udp49361
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 1)
+        let row = try XCTUnwrap(snapshot.snapshot.listeners.first)
+        XCTAssertEqual(row.processName, "tailscaled")
+        XCTAssertEqual(row.pid, 317)
+        XCTAssertEqual(row.localPorts, [38832, 41641, 49361])
+        XCTAssertEqual(row.transports, [.tcp, .udp])
+        XCTAssertEqual(row.endpoints.map(\.rawValue), [
+            "0.0.0.0:38832->0.0.0.0:*",
+            "0.0.0.0:41641->0.0.0.0:*",
+            "0.0.0.0:49361->0.0.0.0:*"
+        ])
+        XCTAssertEqual(row.remoteSocketIdentity, "sk:tcp38832,sk:udp41641,sk:udp49361")
+    }
+
+    func testSameProcessConnectionsGroupIntoOneVisibleConnection() async throws {
+        let output = """
+        tcp ESTAB 0 0 192.0.2.10:41641 198.51.100.20:50000 users:((\"tailscaled\",pid=317,fd=6)) ino:60001 sk:conn-one
+        tcp ESTAB 0 0 192.0.2.10:41642 198.51.100.21:50001 users:((\"tailscaled\",pid=317,fd=7)) ino:60002 sk:conn-two
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.connections.count, 1)
+        let row = try XCTUnwrap(snapshot.snapshot.connections.first)
+        XCTAssertEqual(row.processName, "tailscaled")
+        XCTAssertEqual(row.pid, 317)
+        XCTAssertEqual(row.localPorts, [41641, 41642])
+        XCTAssertEqual(row.remoteSocketIdentity, "sk:conn-one,sk:conn-two")
+    }
+
+    func testSameNameDifferentPIDsRemainSeparateProcessRows() async throws {
+        let output = """
+        tcp LISTEN 0 128 0.0.0.0:9001 0.0.0.0:* users:((\"worker\",pid=101,fd=3)) ino:1 sk:one
+        tcp LISTEN 0 128 0.0.0.0:9002 0.0.0.0:* users:((\"worker\",pid=202,fd=3)) ino:2 sk:two
+        """
+
+        let snapshot = try await scan(output)
+
+        XCTAssertEqual(snapshot.snapshot.listeners.count, 2)
+        XCTAssertEqual(Set(snapshot.snapshot.listeners.map(\.pid)), [101, 202])
+        XCTAssertNotEqual(snapshot.snapshot.listeners[0].id, snapshot.snapshot.listeners[1].id)
     }
 
     func testRevalidationSnapshotRetainsOwnerlessRowsHiddenFromTheUI() async throws {

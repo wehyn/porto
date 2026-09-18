@@ -105,13 +105,19 @@ actor RemoteProcessTerminator: ProcessTerminating {
             return .failed(.revalidationFailed)
         case .success(let targeted):
             let revalidationSnapshot = targeted.revalidationSnapshot ?? targeted.snapshot
-            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+            guard let current = revalidationSnapshot.allRows.first(where: { candidate in
+                if row.isDockerContainer { return candidate.id == row.id }
+                return matchesRemoteProcess(candidate, requested: row)
+            }) else {
                 if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
                     return .failed(.revalidationFailed)
                 }
                 return .failed(.staleTarget)
             }
-            return equivalent(current, row) ? .matched : .failed(.staleTarget)
+            let matches = row.isDockerContainer
+                ? equivalent(current, row)
+                : matchesRemoteProcess(current, requested: row)
+            return matches ? .matched : .failed(.staleTarget)
         }
     }
 
@@ -150,6 +156,32 @@ actor RemoteProcessTerminator: ProcessTerminating {
         }
         return lhs.pid == rhs.pid && lhs.endpoints == rhs.endpoints
             && lhs.remoteSocketIdentity == rhs.remoteSocketIdentity
+    }
+
+    private func matchesRemoteProcess(_ current: PortProcess, requested: PortProcess) -> Bool {
+        guard validRemoteRow(requested), validRemoteRow(current),
+              !current.isDockerContainer, !requested.isDockerContainer,
+              current.processName == requested.processName,
+              current.activityKind == requested.activityKind,
+              current.source == requested.source,
+              current.controlTarget == requested.controlTarget,
+              Set(requested.localPorts).isSubset(of: Set(current.localPorts)),
+              Set(requested.transports).isSubset(of: Set(current.transports)),
+              Set(requested.endpoints).isSubset(of: Set(current.endpoints)),
+              let requestedSocketIdentities = socketIdentities(requested.remoteSocketIdentity),
+              let currentSocketIdentities = socketIdentities(current.remoteSocketIdentity),
+              requestedSocketIdentities.isSubset(of: currentSocketIdentities) else {
+            return false
+        }
+        return true
+    }
+
+    private func socketIdentities(_ value: String?) -> Set<String>? {
+        guard let value else { return nil }
+        let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return Set(parts)
     }
 
     private func signal(_ signal: RemoteSSHSignal, row: PortProcess) async -> SignalResult {
@@ -262,13 +294,19 @@ actor RemoteProcessTerminator: ProcessTerminating {
         switch outcome {
         case .success(let snapshot):
             let revalidationSnapshot = snapshot.revalidationSnapshot ?? snapshot.snapshot
-            guard let current = revalidationSnapshot.allRows.first(where: { $0.id == row.id }) else {
+            guard let current = revalidationSnapshot.allRows.first(where: { candidate in
+                if row.isDockerContainer { return candidate.id == row.id }
+                return matchesRemoteProcess(candidate, requested: row)
+            }) else {
                 if row.isDockerContainer, dockerHostEvidenceIsPresent(for: row, in: revalidationSnapshot) {
                     return .forceKillAvailable
                 }
                 return .exited
             }
-            return equivalent(current, row) ? .present : .failed
+            let matches = row.isDockerContainer
+                ? equivalent(current, row)
+                : matchesRemoteProcess(current, requested: row)
+            return matches ? .present : .failed
         case .failure: return .failed
         case .cancelled: return .cancelled
         }
