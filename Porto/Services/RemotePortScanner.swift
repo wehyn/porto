@@ -62,7 +62,7 @@ actor RemotePortScanner: PortSnapshotScanning {
 
         switch outputParser.parse(execution.stdout, targetID: request.targetID) {
         case let .success(parsed):
-            if includeDockerMetadata {
+            if includeDockerMetadata && parsed.dockerMetadataSucceeded {
                 cachedDockerPortCatalog = parsed.dockerPorts
                 cachedDockerMetadataAt = now()
             }
@@ -73,9 +73,14 @@ actor RemotePortScanner: PortSnapshotScanning {
                 skippedRecords: parsed.skippedRecords,
                 durationMilliseconds: execution.durationMilliseconds
             )
-            let dockerPorts = includeDockerMetadata
-                ? parsed.dockerPorts
-                : (cachedDockerPortCatalog ?? .empty)
+            let dockerPorts: DockerPortCatalog
+            if includeDockerMetadata {
+                dockerPorts = parsed.dockerMetadataSucceeded
+                    ? parsed.dockerPorts
+                    : (cachedDockerPortCatalog ?? .empty)
+            } else {
+                dockerPorts = cachedDockerPortCatalog ?? .empty
+            }
             let dockerLabeledSnapshot = dockerPorts.applying(to: parsed.snapshot)
             return .success(TargetedPortSnapshot(
                 targetID: request.targetID,

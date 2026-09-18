@@ -97,6 +97,25 @@ final class RemotePortScannerTests: XCTestCase {
         ])
     }
 
+    func testFailedDockerMetadataDoesNotEraseLastSuccessfulCatalog() async throws {
+        let runner = SequencedStubSSHCommandRunner(results: [
+            execution(stdout: Data(dockerOutput(name: "web").utf8), status: 0),
+            execution(stdout: Data(dockerFailureOutput().utf8), status: 0)
+        ])
+        let scanner = RemotePortScanner(profile: profile, runner: runner)
+
+        _ = await scanner.scan(request(trigger: .presentation))
+        let failedMetadata = await scanner.scan(request(trigger: .manual, generation: 2))
+
+        let row = try XCTUnwrap(success(failedMetadata)?.snapshot.listeners.first)
+        XCTAssertEqual(row.processName, "web")
+        XCTAssertTrue(row.isDockerContainer)
+        let operations = await runner.operations()
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .scan(includeDockerMetadata: true)
+        ])
+    }
+
     func testRemotePolicyHidesCommonServicePortsButKeepsCustomPorts() async throws {
         let output = """
         tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* ino:22
@@ -421,6 +440,10 @@ final class RemotePortScannerTests: XCTestCase {
 
     private func dockerOutput(name: String) -> String {
         socketOutput(processName: "host") + "__PORTO_DOCKER__\n0123456789ab\t\(name)\t0.0.0.0:8080->8080/tcp\n"
+    }
+
+    private func dockerFailureOutput() -> String {
+        socketOutput(processName: "host") + "__PORTO_DOCKER__\n__PORTO_DOCKER_STATUS__1\n"
     }
 
     private func execution(stdout: Data = Data(), stderr: Data = Data(), status: Int32?) -> SSHCommandExecutionResult {

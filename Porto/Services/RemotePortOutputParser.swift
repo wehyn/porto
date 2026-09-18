@@ -5,6 +5,7 @@ struct ParsedRemotePortOutput: Equatable, Sendable {
     let validRecords: Int
     let skippedRecords: Int
     let dockerPorts: DockerPortCatalog
+    let dockerMetadataSucceeded: Bool
 }
 
 enum RemotePortOutputParserResult: Equatable, Sendable {
@@ -16,6 +17,7 @@ enum RemotePortOutputParserResult: Equatable, Sendable {
 /// Docker publication metadata, then delegates socket parsing to `SsParser`.
 struct RemotePortOutputParser: Sendable {
     static let dockerMarker = "__PORTO_DOCKER__"
+    static let dockerStatusPrefix = "__PORTO_DOCKER_STATUS__"
 
     private let ssParser: SsParser
     private let dockerParser: DockerPortParser
@@ -34,28 +36,41 @@ struct RemotePortOutputParser: Sendable {
                 snapshot: parsed.snapshot,
                 validRecords: parsed.validRecords,
                 skippedRecords: parsed.skippedRecords,
-                dockerPorts: dockerParser.parse(sections.docker)
+                dockerPorts: dockerParser.parse(sections.docker),
+                dockerMetadataSucceeded: sections.dockerMetadataSucceeded
             ))
         case let .failure(error):
             return .failure(error)
         }
     }
 
-    private func split(_ output: String) -> (ss: String, docker: String) {
+    private func split(_ output: String) -> (ss: String, docker: String, dockerMetadataSucceeded: Bool) {
         let markerLine = "\(Self.dockerMarker)\n"
         if output.hasPrefix(markerLine) {
             let dockerStart = output.index(output.startIndex, offsetBy: markerLine.count)
-            return ("", String(output[dockerStart...]))
+            let dockerSection = dockerSection(String(output[dockerStart...]))
+            return ("", dockerSection.docker, dockerSection.dockerMetadataSucceeded)
         }
 
         guard let marker = output.range(of: "\n\(markerLine)") else {
-            return (output, "")
+            return (output, "", true)
         }
 
         let ssOutput = String(output[..<marker.lowerBound])
         let dockerStart = marker.upperBound
-        let dockerOutput = String(output[dockerStart...])
-        return (ssOutput, dockerOutput)
+        let dockerSection = dockerSection(String(output[dockerStart...]))
+        return (ssOutput, dockerSection.docker, dockerSection.dockerMetadataSucceeded)
+    }
+
+    private func dockerSection(_ output: String) -> (docker: String, dockerMetadataSucceeded: Bool) {
+        var lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        var succeeded = true
+        if let statusIndex = lines.lastIndex(where: { $0.hasPrefix(Self.dockerStatusPrefix) }) {
+            let statusLine = lines.remove(at: statusIndex)
+            let status = statusLine.dropFirst(Self.dockerStatusPrefix.count)
+            succeeded = status == "0"
+        }
+        return (lines.joined(separator: "\n"), succeeded)
     }
 }
 

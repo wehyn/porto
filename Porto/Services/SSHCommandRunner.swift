@@ -51,7 +51,7 @@ actor SSHCommandRunner: SSHCommandRunning {
     static let stderrLimit = 256 * 1024
     static let timeout: Duration = .seconds(5)
     static let remoteSocketCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e'"
-    static let remoteDockerCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null || true; fi; exit \"$ss_status\"'"
+    static let remoteDockerCommand = "LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf \"__PORTO_DOCKER__\\n\"; docker_status=127; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format \"{{.ID}}\\t{{.Names}}\\t{{.Ports}}\" 2>/dev/null; docker_status=$?; fi; printf \"__PORTO_DOCKER_STATUS__%s\\n\" \"$docker_status\"; exit \"$ss_status\"'"
 
     private let executableURL: URL
     private let stdoutLimit: Int

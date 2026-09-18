@@ -194,6 +194,8 @@ final class SSHCommandRunnerTests: XCTestCase {
 
         XCTAssertEqual(arguments.last, SSHCommandRunner.remoteDockerCommand)
         XCTAssertTrue(arguments.last?.contains("docker ps --format") ?? false)
+        XCTAssertTrue(arguments.last?.contains("__PORTO_DOCKER_STATUS__") ?? false)
+        XCTAssertFalse(arguments.last?.contains("|| true") ?? true)
     }
 
     func testSignalCommandsAreExactAndContainerIDsAreValidated() throws {
