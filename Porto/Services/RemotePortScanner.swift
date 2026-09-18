@@ -82,12 +82,17 @@ actor RemotePortScanner: PortSnapshotScanning {
                 dockerPorts = cachedDockerPortCatalog ?? .empty
             }
             let dockerLabeledSnapshot = dockerPorts.applying(to: parsed.snapshot)
+            let revalidationSnapshot = grouped(dockerLabeledSnapshot, scanGeneration: request.scanGeneration)
+            let visibleSnapshot = grouped(
+                visibilityPolicy.filtering(dockerLabeledSnapshot),
+                scanGeneration: request.scanGeneration
+            )
             return .success(TargetedPortSnapshot(
                 targetID: request.targetID,
                 sessionGeneration: request.sessionGeneration,
-                snapshot: visibilityPolicy.filtering(dockerLabeledSnapshot),
+                snapshot: visibleSnapshot,
                 diagnostics: diagnostics,
-                revalidationSnapshot: dockerLabeledSnapshot
+                revalidationSnapshot: revalidationSnapshot
             ))
         case .failure:
             return failure(.malformedOutput, request: request, diagnostics: base)
@@ -105,6 +110,14 @@ actor RemotePortScanner: PortSnapshotScanning {
 
     func cancelActiveWork() async {
         await runner.cancelActive()
+    }
+
+    private func grouped(_ snapshot: PortSnapshot, scanGeneration: UInt64) -> PortSnapshot {
+        let rows = PortProcessGrouping.group(snapshot.allRows, scanGeneration: scanGeneration)
+        return PortSnapshot(
+            listeners: rows.filter { $0.activityKind == .listener },
+            connections: rows.filter { $0.activityKind == .connection }
+        )
     }
 
     private func failure(

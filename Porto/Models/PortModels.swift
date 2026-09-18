@@ -113,7 +113,7 @@ struct PortProcess: Identifiable, Equatable, Sendable, Codable {
     let origin: PortProcessOrigin
     /// The lowest port, retained for existing sorting and single-port callers.
     let localPort: Int
-    /// Ordered unique ports; local and non-Docker rows contain one value.
+    /// Ordered unique ports represented by this process/activity row.
     let localPorts: [Int]
     let transports: [TransportProtocol]
     let processName: String

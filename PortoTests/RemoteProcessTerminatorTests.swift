@@ -120,6 +120,76 @@ final class RemoteProcessTerminatorTests: XCTestCase {
         XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
     }
 
+    func testStopRevalidatesGroupedRemoteRowAgainstFreshSupersetAndSignalsPID() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let requestedOutput = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:(("tailscaled",pid=77,fd=3)) ino:7 sk:one
+        tcp LISTEN 0 128 0.0.0.0:8443 10.0.0.2:5000 users:(("tailscaled",pid=77,fd=4)) ino:8 sk:two
+        """.utf8)
+        let freshOutput = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:(("tailscaled",pid=77,fd=3)) ino:7 sk:one
+        tcp LISTEN 0 128 0.0.0.0:8443 10.0.0.2:5000 users:(("tailscaled",pid=77,fd=4)) ino:8 sk:two
+        tcp LISTEN 0 128 127.0.0.1:9090 10.0.0.3:5000 users:(("tailscaled",pid=77,fd=5)) ino:9 sk:three
+        """.utf8)
+        let parsed = try XCTUnwrap(parsedSnapshot(requestedOutput, targetID: targetID))
+        let row = try XCTUnwrap(PortProcessGrouping.group(parsed.listeners, scanGeneration: 1).first)
+        let runner = TerminatorRunner(scanOutputs: [freshOutput, Data()])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .exited)
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .signal(.term, pid: 77), .scan(includeDockerMetadata: true)
+        ])
+    }
+
+    func testStopRejectsGroupedRemoteRowWhenFreshSocketIdentityChanges() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let requestedOutput = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:(("tailscaled",pid=77,fd=3)) ino:7 sk:one
+        tcp LISTEN 0 128 0.0.0.0:8443 10.0.0.2:5000 users:(("tailscaled",pid=77,fd=4)) ino:8 sk:two
+        """.utf8)
+        let changedOutput = Data("""
+        tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:(("tailscaled",pid=77,fd=3)) ino:7 sk:changed
+        tcp LISTEN 0 128 0.0.0.0:8443 10.0.0.2:5000 users:(("tailscaled",pid=77,fd=4)) ino:8 sk:two
+        """.utf8)
+        let parsed = try XCTUnwrap(parsedSnapshot(requestedOutput, targetID: targetID))
+        let row = try XCTUnwrap(PortProcessGrouping.group(parsed.listeners, scanGeneration: 1).first)
+        let runner = TerminatorRunner(scanOutputs: [changedOutput])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .failed(.staleTarget))
+        XCTAssertEqual(operations, [.scan(includeDockerMetadata: true)])
+    }
+
+    func testStopRevalidatesVisibleRemoteRowAgainstGroupedCurrentRow() async throws {
+        let profile = testProfile()
+        let targetID = PortTargetID(rawValue: "remote:\(profile.id.uuidString)")
+        let visibleOutput = Data("tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:((\"app\",pid=42,fd=3)) ino:7 sk:visible\n".utf8)
+        let groupedOutput = Data("""
+        tcp LISTEN 0 128 0.0.0.0:80 10.0.0.1:5000 users:(("app",pid=42,fd=2)) ino:6 sk:hidden
+        tcp LISTEN 0 128 0.0.0.0:8080 10.0.0.1:5000 users:(("app",pid=42,fd=3)) ino:7 sk:visible
+        """.utf8)
+        let row = try XCTUnwrap(parsedRow(visibleOutput, targetID: targetID))
+        let runner = TerminatorRunner(scanOutputs: [groupedOutput, Data()])
+        let terminator = RemoteProcessTerminator(profile: profile, runner: runner, clock: ImmediateClock())
+
+        let result = await terminator.stop(row: row)
+        let operations = await runner.operations()
+
+        XCTAssertEqual(result, .exited)
+        XCTAssertEqual(operations, [
+            .scan(includeDockerMetadata: true), .signal(.term, pid: 42), .scan(includeDockerMetadata: true)
+        ])
+    }
+
     func testDockerStopUsesContainerSignalForPIDLessMultiPortRow() async throws {
         let profile = RemoteServerProfile(
             id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
@@ -275,6 +345,11 @@ final class RemoteProcessTerminatorTests: XCTestCase {
     private func parsedRow(_ output: Data, targetID: PortTargetID, applyingDocker: Bool = false) -> PortProcess? {
         guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID) else { return nil }
         return (applyingDocker ? parsed.dockerPorts.applying(to: parsed.snapshot) : parsed.snapshot).listeners.first
+    }
+
+    private func parsedSnapshot(_ output: Data, targetID: PortTargetID) -> PortSnapshot? {
+        guard case let .success(parsed) = RemotePortOutputParser().parse(output, targetID: targetID) else { return nil }
+        return parsed.snapshot
     }
 
     private func testProfile() -> RemoteServerProfile {

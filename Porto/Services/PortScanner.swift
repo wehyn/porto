@@ -185,8 +185,8 @@ actor PortScanner: PortScanning {
         let matchedGroup = parsed.groups.first { group in
             group.key.pid == pid
                 && group.key.activityKind == row.activityKind
-                && group.key.transport == row.transport
-                && group.key.localPort == row.localPort
+                && row.transports.contains(group.key.transport)
+                && row.localPorts.contains(group.key.localPort)
         }
         if let matchedGroup {
             return .matched(processName: matchedGroup.processName)
@@ -233,9 +233,10 @@ actor PortScanner: PortScanning {
             )
         }
 
+        let groupedRows = PortProcessGrouping.group(rows, scanGeneration: generation)
         return PortSnapshot(
-            listeners: PortProcessSort.sort(rows.filter { $0.activityKind == .listener }),
-            connections: PortProcessSort.sort(rows.filter { $0.activityKind == .connection })
+            listeners: PortProcessSort.sort(groupedRows.filter { $0.activityKind == .listener }),
+            connections: PortProcessSort.sort(groupedRows.filter { $0.activityKind == .connection })
         )
     }
 
