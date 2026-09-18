@@ -6,6 +6,9 @@ struct PortoApp: App {
     @StateObject private var monitor: PortMonitor
     @StateObject private var presentationObserver: MenuPresentationObserver
     @StateObject private var updater: PortoUpdater
+#if DEBUG
+    private let debugPopoverWindowPresenter: DebugPopoverWindowPresenter
+#endif
 
     init() {
         let runner = LsofRunner()
@@ -18,7 +21,7 @@ struct PortoApp: App {
             signalSender: DarwinProcessSignalSender()
         )
         let profileStore = UserDefaultsRemoteServerProfileStore()
-        _monitor = StateObject(wrappedValue: PortMonitor(
+        let monitor = PortMonitor(
             localScanner: scanner,
             terminator: terminator,
             remoteScannerFactory: { profile in RemotePortScanner(profile: profile, runner: sshRunner) },
@@ -26,9 +29,21 @@ struct PortoApp: App {
             remoteTerminatorFactory: { profile in
                 RemoteProcessTerminator(profile: profile, runner: sshRunner)
             }
-        ))
-        _presentationObserver = StateObject(wrappedValue: MenuPresentationObserver())
-        _updater = StateObject(wrappedValue: PortoUpdater())
+        )
+        let presentationObserver = MenuPresentationObserver()
+        let updater = PortoUpdater()
+        _monitor = StateObject(wrappedValue: monitor)
+        _presentationObserver = StateObject(wrappedValue: presentationObserver)
+        _updater = StateObject(wrappedValue: updater)
+#if DEBUG
+        let debugPopoverWindowPresenter = DebugPopoverWindowPresenter()
+        self.debugPopoverWindowPresenter = debugPopoverWindowPresenter
+        if DebugPopoverLaunchConfiguration.isEnabled(
+            environment: ProcessInfo.processInfo.environment
+        ) {
+            debugPopoverWindowPresenter.schedulePresentation(monitor: monitor, updater: updater)
+        }
+#endif
     }
 
     var body: some Scene {
