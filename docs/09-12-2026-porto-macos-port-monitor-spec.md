@@ -41,7 +41,7 @@ V1 is acceptable only when all of the following are true:
 - Opening Porto immediately starts a scan and presents current rows, a first-load state, or an actionable scan error.
 - All visible listener rows appear in the primary list, with active connections available in a collapsed-by-default section.
 - This Mac remains the default target; a selected remote target hides configured common host-service ports, retains other valid rows, and marks eligible rows actionable or unavailable according to validated control identity and permissions.
-- Results refresh every 2 seconds while the popover is open and do not refresh while it is closed.
+- Opening the popover requests one immediate scan. While it remains open, automatic scans follow the target- and power-aware cadence in Section 5.5; closing the popover stops normal refresh work.
 - There is never more than one Porto-owned local `lsof` or remote SSH scan child in flight.
 - Normal stop never sends SIGKILL. Force Kill is unavailable until SIGTERM has failed to end the revalidated process within the defined grace period.
 - Every signal attempt revalidates immutable process identity and the selected port activity.
@@ -130,8 +130,12 @@ Sockets without a numeric local port, with unsupported protocols, or that cannot
 ### 5.5 Refresh behavior
 
 - Opening the popover triggers an immediate scan even when a snapshot exists.
-- While visible, the monitor requests refresh every 2 seconds from the preceding request.
+- Normal local automatic scans use 2 seconds after a changed or first successful snapshot, then 5, 15, and 30 seconds after consecutive unchanged successful snapshots. Normal remote automatic scans use 5, 15, 30, and 60 seconds.
+- Low Power Mode uses 10, 30, 60, and 120 seconds for local targets, and 15, 30, 60, and 120 seconds for remote targets. Each sequence caps at its final value.
+- A changed visible snapshot resets the unchanged counter. Diagnostics, timestamps, and other timing-only changes do not. Failures use an independent 2, 4, 8, 16, and 30 second retry backoff.
+- Manual Refresh and Retry request an immediate scan; the resulting snapshot determines the next automatic delay. Target changes and profile presentation paths start a fresh target cadence.
 - Closing cancels the refresh loop and pending coalesced refresh. It asks an in-flight normal `lsof` child to terminate because the result is no longer needed.
+- Reopening starts a new immediate scan. Low Power Mode changes only automatic cadence and never disables an explicit refresh or Retry action.
 - Manual refresh starts immediately when idle or becomes the one pending refresh when a scan is running.
 - The refresh icon spins only during a user-requested manual refresh; background refreshes leave it static.
 - An unchanged successful scan retains equal row arrays while updating scan diagnostics.
@@ -313,8 +317,22 @@ running.
 following arguments (the alias is passed after `--`):
 
 ```text
-/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null || true; fi; exit "$ss_status"'
+/usr/bin/ssh -T -n -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 -o NumberOfPasswordPrompts=0 -o PermitLocalCommand=no -o ClearAllForwardings=yes -o RequestTTY=no -o RemoteCommand=none -o ControlMaster=no -o ControlPath=none -- <literal-ssh-alias> LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; docker_status=127; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null; docker_status=$?; fi; printf "__PORTO_DOCKER_STATUS__%s\n" "$docker_status"; exit "$ss_status"'
 ```
+
+Automatic scans inside the 30-second Docker-metadata window use the same SSH
+arguments with this socket-only remote command:
+
+```text
+LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e'
+```
+
+The full command is used for the initial/presentation scan, target changes,
+manual Refresh, Retry, and metadata expiry. A scheduled scan before expiry
+uses the socket-only command and applies the last successful `DockerPortCatalog`
+only after the new `ss` snapshot parses successfully. Both forms are one
+short-lived direct SSH process; neither creates a persistent session or
+multiplexed control socket.
 
 The command and its environment are fixed except for inherited SSH settings
 (including `SSH_AUTH_SOCK`) and `LC_ALL=C`. `ss` output is drained concurrently,
@@ -339,10 +357,12 @@ matching records into stable logical container rows with ordered host-port
 lists without changing socket diagnostics. Every published Docker port remains
 visible, including common ports filtered for ordinary remote host services.
 Docker display names omit the generated `Docker ·` prefix and are never command
-targets. The Docker query is
-bounded and is skipped when
-`timeout` is unavailable; a Docker failure never replaces a successful `ss`
-result. Exit status 255 alone is a generic transport failure; bounded
+targets. The Docker query is bounded and is skipped when `timeout` is
+unavailable; its exit status is emitted in the fixed status marker and never
+changes the `ss` exit status. A failed Docker query retains the last successful
+catalog, while a failed `ss`/SSH result retains the last successful snapshot
+and catalog; no cached metadata is published as a replacement for that failed
+socket snapshot. Exit status 255 alone is a generic transport failure; bounded
 `LC_ALL=C` diagnostics may classify authentication, host-key, reachability,
 timeout, or missing/incompatible `ss` failures.
 
@@ -350,11 +370,11 @@ timeout, or missing/incompatible `ss` failures.
 
 ### 8.1 Components
 
-- `PortMonitor` is a `@MainActor` observable model for rows, presentation, section expansion, scan status, timestamps, errors, and per-process termination state.
+- `PortMonitor` is a `@MainActor` observable model for rows, presentation, section expansion, scan status, timestamps, errors, and per-process termination state. It keeps the adaptive unchanged-success counter and failure backoff internal to scheduling; `isInitialLoading` is the published first-load state, while in-flight work and diagnostics do not force a visible publication when the rendered state is unchanged.
 - `PortScanner` is an injected `Sendable` service or actor for subprocess execution and parsing away from the main actor.
 - `LsofRunner` is the single serialized owner of every normal and targeted `lsof` child.
 - `SSHHostCatalog` reads the user's SSH configuration files with bounded, deterministic include traversal.
-- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed Linux `ss` query plus optional `docker ps` publication metadata and validated signal commands for the selected alias.
+- `RemotePortScanner` and its actor-owned `SSHCommandRunner` perform one fixed Linux `ss` query, optionally add the bounded `docker ps` publication metadata, reuse a successful Docker catalog for up to 30 seconds of scheduled scans, and issue validated signal commands for the selected alias.
 - `ProcessInspector` reads immutable process identity and existence.
 - `ProcessTerminator` coordinates validation and signaling away from the main actor.
 - `MenuPresentationObserver` reports actual popover presentation.
@@ -514,8 +534,8 @@ When no snapshot exists, omit `Showing the last results.` and display a retry ac
 ## 12. Performance and resources
 
 - Closed popover: zero recurring timers, zero normal `lsof` or SSH children, and no scan CPU activity after user-requested termination work settles.
-- Open popover: at most one normal scan and one pending request; across local and selected-remote work there is at most one Porto-owned `lsof` or SSH child.
-- No per-row timers, polling, subprocesses, bundle lookups, or continuous animations. A remote SSH request occurs only for the selected target while visible or after an explicit retry.
+- Open popover: at most one normal scan and one pending request; across local and selected-remote work there is at most one Porto-owned `lsof` or SSH child. Automatic refresh follows the adaptive cadence in Section 5.5.
+- No per-row timers, polling, subprocesses, bundle lookups, or continuous animations. A remote SSH request occurs only for the selected target while visible or after an explicit retry; scheduled remote scans inside the metadata window use the socket-only command and cached Docker catalog.
 - Process launch, pipe reads, parsing, sorting, and identity enrichment run off the main actor.
 - Publish sorted immutable rows only when meaningful values change.
 - Retain only the current successful grouped snapshot, current errors, timestamps, and termination states. Release raw scan data after each scan.
@@ -619,7 +639,11 @@ Fixtures are sanitized and contain no user-specific public IPs or process data.
 - Concurrent stdout/stderr draining.
 - Last-valid-snapshot retention on every failure.
 - Successful empty result replacing the snapshot.
-- Immediate open scan and 2-second schedule with an injected clock.
+- Immediate open scan and injected-clock coverage for normal local 2/5/15/30,
+  normal remote 5/15/30/60, Low Power local 10/30/60/120, Low Power remote
+  15/30/60/120, and failure 2/4/8/16/30 cadences.
+- Changed-snapshot reset, unchanged-snapshot cap, diagnostic-only update
+  suppression, explicit-refresh bypass, target reset, and closure behavior.
 - Pause and child cancellation on close.
 - One in-flight normal scan and one coalesced follow-up during refresh bursts.
 - One total `lsof` child when targeted validation overlaps a scheduled or manual refresh request.
@@ -630,7 +654,8 @@ Fixtures are sanitized and contain no user-specific public IPs or process data.
 - One identity lookup per distinct PID per scan.
 - Remote target selection, fixed SSH argument contract, bounded output and
   timeout/cancellation cleanup, diagnostic classification, target-scoped IDs,
-  ownerless sockets, per-target cache retention, stale-result suppression,
+  ownerless sockets, socket-only scheduled scans, 30-second Docker metadata
+  cache reuse/expiry, per-target cache retention, stale-result suppression,
   bounded failure backoff, remote process/container termination guards, and
   cancellation-safe signal workflows.
 
@@ -676,7 +701,7 @@ Run the generated Debug `.app` on macOS 26 and verify:
 
 - Menu-bar icon with no Dock or application-switcher presence.
 - Popover sizing, scrolling, dismissal, and reopening on tested display edges.
-- Immediate open scan and stopped periodic scanning after status-item toggle, outside click, Escape, or app switch.
+- Immediate open scan, adaptive automatic cadence, and stopped periodic scanning after status-item toggle, outside click, Escape, or app switch.
 - Activity Monitor shows no normal `lsof` or SSH child while closed and never more than one Porto-owned scan child while open.
 - Stable memory and no interaction stalls over 10 minutes.
 - Usable behavior with hundreds of connection rows.
@@ -704,7 +729,12 @@ authorized signal delivery as expected user-owned side effects, not as Porto
 persistence. Permission/capability limits must leave rows visible and explain
 why control is unavailable.
 
-On a Docker host with published ports, verify that repeated IPv4/IPv6 records
+On a Docker host with published ports, verify that the initial/presentation
+scan and explicit Refresh/Retry use the Docker-inclusive command, that an
+automatic scan inside 30 seconds uses the socket-only command while retaining
+the last successful labels, and that expiry requests fresh metadata. Verify
+that a failed `ss` result does not publish cached metadata as a replacement.
+Then verify that repeated IPv4/IPv6 records
 for the same container appear once, that one container's ports 53 and 80 are
 shown in one ordered row, that TCP and UDP expose a combined protocol summary,
 that ports 80, 1455, 2283, and 6565 are not repeated, and that different
@@ -717,7 +747,7 @@ containers and listener/connection activity remain separate.
 | AC-01 | Menu-bar-only app with no main window or Dock presence | Built-app manual test |
 | AC-02 | Listeners appear by default and connections remain collapsed until expanded | UI and manual tests |
 | AC-03 | TCP/UDP classification and grouping follow Sections 4 and 7 | Parser fixtures |
-| AC-04 | Immediate open scan and 2-second visible-only refresh | Clock test and runtime observation |
+| AC-04 | Immediate open scan and adaptive target/power-aware visible-only refresh | Cadence clock tests and runtime observation |
 | AC-05 | One total Porto-owned `lsof` or SSH child; one normal scan and one coalesced refresh maximum | Concurrency tests and Activity Monitor |
 | AC-06 | Failure retains valid snapshot; successful empty scan clears it | Scanner tests |
 | AC-07 | Normal stop revalidates identity and selected socket | Termination tests |

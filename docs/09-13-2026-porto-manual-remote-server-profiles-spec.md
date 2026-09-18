@@ -213,11 +213,33 @@ action.
   proxy commands, arbitrary SSH options, and user-entered remote commands are
   out of scope.
 
-- Remote inspection continues to run the source-controlled fixed Linux `ss`
-  query with numeric addresses and ports, one socket per line, TCP and UDP
-  selection, process metadata when permitted, and extended socket metadata.
-  Optional bounded Docker metadata remains part of the existing remote scan
-  behavior and is not configurable per profile.
+- Remote inspection continues to use source-controlled fixed Linux commands.
+  The socket-only command is:
+
+  ```text
+  LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e'
+  ```
+
+  The initial/presentation and metadata-inclusive command is:
+
+  ```text
+  LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c 'ss -H -n -O -a -t -u -p -e; ss_status=$?; printf "__PORTO_DOCKER__\n"; docker_status=127; if command -v docker >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then timeout -k 1 1 docker ps --format "{{.ID}}\t{{.Names}}\t{{.Ports}}" 2>/dev/null; docker_status=$?; fi; printf "__PORTO_DOCKER_STATUS__%s\n" "$docker_status"; exit "$ss_status"'
+  ```
+
+  The full command is used for the first/presentation scan, target changes,
+  manual Refresh, Retry, and Docker-metadata expiry. Automatic scans within
+  the 30-second metadata window use the socket-only command and the last
+  successful `DockerPortCatalog`. Low Power Mode changes only the automatic
+  cadence; it never disables an explicit Refresh or Retry. The commands are
+  not configurable per profile.
+
+- The cached Docker catalog is applied only after a new `ss` snapshot parses
+  successfully. The full command emits a fixed Docker-query status marker;
+  failed Docker metadata does not erase the last successful catalog. A failed
+  `ss` result never publishes cached metadata as a replacement snapshot. Each
+  scan remains a short-lived direct SSH process with `ControlMaster=no` and
+  `ControlPath=none`; profile fields cannot inject arbitrary remote command
+  text.
 
 - The existing remote parser continues to classify TCP LISTEN records as
   listeners, unconnected bound UDP sockets as listeners, and records with a
@@ -321,6 +343,13 @@ action.
   on the next refresh, failures retaining enabled state, popover-close
   cancellation, and rejection of late results.
 
+- Adaptive remote refresh tests must cover the immediate full scan, the
+  normal 5/15/30/60-second cadence, Low Power 15/30/60/120-second cadence,
+  independent 2/4/8/16/30-second failure backoff, socket-only scheduled scans
+  before metadata expiry, forced metadata refresh at 30 seconds and for
+  explicit actions, reuse of the last successful Docker catalog, and
+  retention of that catalog across failed metadata/`ss` work.
+
 - SSH command contract tests must verify direct executable launch, explicit
   profile arguments, empty-config behavior, default and custom ports,
   username separation, optional identity-file handling, inherited agent
@@ -332,7 +361,8 @@ action.
 - Existing remote parser and scanner tests remain authoritative for `ss`
   classification, IPv4/IPv6 handling, TCP/UDP grouping, missing process
   metadata, Docker labels, common-port filtering, diagnostics, timeout
-  mapping, and stale snapshots. The target identity in those tests changes from
+  mapping, socket-only command selection, Docker metadata cache expiry and
+  reuse, and stale snapshots. The target identity in those tests changes from
   an alias to a stable profile identifier.
 
 - Remote termination tests must use a fake remote command executor or equivalent
