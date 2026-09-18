@@ -9,7 +9,8 @@ final class PortMonitor: ObservableObject {
 
     @Published private(set) var listenerRows: [PortProcess] = []
     @Published private(set) var connectionRows: [PortProcess] = []
-    @Published private(set) var isScanning = false
+    private(set) var isScanning = false
+    @Published private(set) var isInitialLoading = false
     @Published private(set) var isManualRefreshing = false
     @Published private(set) var hasSnapshot = false
     @Published private(set) var isStale = false
@@ -30,6 +31,8 @@ final class PortMonitor: ObservableObject {
     private let terminator: any ProcessTerminating
     private let ownPID: Int32
     private let clock: any MonitorSleeping
+    private let cadencePolicy: RefreshCadencePolicy
+    private let powerModeProvider: any MonitorPowerModeProviding
     private let profileStore: (any RemoteServerProfileStoring)?
     private let remoteScannerFactory: RemoteScannerFactory?
     private let remoteTerminatorFactory: RemoteTerminatorFactory?
@@ -60,7 +63,9 @@ final class PortMonitor: ObservableObject {
         profileStore: any RemoteServerProfileStoring,
         remoteTerminatorFactory: @escaping RemoteTerminatorFactory,
         ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier),
-        clock: any MonitorSleeping = SystemMonitorClock()
+        clock: any MonitorSleeping = SystemMonitorClock(),
+        cadencePolicy: RefreshCadencePolicy = RefreshCadencePolicy(),
+        powerModeProvider: any MonitorPowerModeProviding = SystemMonitorPowerModeProvider()
     ) {
         self.localScanner = localScanner
         self.terminator = terminator
@@ -69,6 +74,8 @@ final class PortMonitor: ObservableObject {
         self.remoteTerminatorFactory = remoteTerminatorFactory
         self.ownPID = ownPID
         self.clock = clock
+        self.cadencePolicy = cadencePolicy
+        self.powerModeProvider = powerModeProvider
         self.activeScanner = localScanner
         self.profiles = profileStore.profiles
     }
@@ -77,7 +84,9 @@ final class PortMonitor: ObservableObject {
         scanner: any PortScanning,
         terminator: any ProcessTerminating,
         ownPID: Int32 = Int32(ProcessInfo.processInfo.processIdentifier),
-        clock: any MonitorSleeping = SystemMonitorClock()
+        clock: any MonitorSleeping = SystemMonitorClock(),
+        cadencePolicy: RefreshCadencePolicy = RefreshCadencePolicy(),
+        powerModeProvider: any MonitorPowerModeProviding = SystemMonitorPowerModeProvider()
     ) {
         self.localScanner = scanner
         self.terminator = terminator
@@ -86,6 +95,8 @@ final class PortMonitor: ObservableObject {
         self.remoteTerminatorFactory = nil
         self.ownPID = ownPID
         self.clock = clock
+        self.cadencePolicy = cadencePolicy
+        self.powerModeProvider = powerModeProvider
         self.activeScanner = scanner
     }
 
@@ -116,10 +127,12 @@ final class PortMonitor: ObservableObject {
         if presented {
             connectionsExpanded = false
             refreshProfiles()
+            resetCadenceState(for: selectedTarget.id)
             pendingRefresh = false
             pendingRefreshTrigger = .scheduled
             pendingManualRefresh = false
             isManualRefreshing = false
+            isInitialLoading = false
             publishSelectedTargetState()
             requestRefresh(trigger: .presentation)
         } else {
@@ -164,8 +177,9 @@ final class PortMonitor: ObservableObject {
                 pendingRefreshTrigger = .scheduled
                 pendingManualRefresh = false
                 isManualRefreshing = false
+                resetCadenceState(for: selectedTarget.id)
                 if scanToken == nil && scheduleTask == nil {
-                    scheduleNext(after: .seconds(2))
+                    scheduleNext(after: cadenceDelay(unchangedSuccesses: 0))
                 }
             }
         } else if selectedTarget.isRemote {
@@ -324,6 +338,7 @@ final class PortMonitor: ObservableObject {
         sessionGeneration &+= 1
         cancelRemoteWorkAndClearState()
         selectedTarget = target
+        resetCadenceState(for: target.id)
         scheduleTask?.cancel()
         scheduleTask = nil
         nextRetrySeconds = nil
@@ -542,6 +557,7 @@ final class PortMonitor: ObservableObject {
     private func cancelRemoteWorkAndClearState() {
         cancelActiveConnectionTest()
         cancelActiveScan()
+        isInitialLoading = false
         terminationTask?.cancel()
         // Keep the in-flight markers until each canceled task reaches its
         // completion handler. This is the cancellation barrier that prevents
@@ -563,6 +579,7 @@ final class PortMonitor: ObservableObject {
         cancelActiveConnectionTest()
         pendingManualRefresh = false
         isManualRefreshing = false
+        isInitialLoading = false
         let scanner = activeScanner
         Task {
             await scanner?.cancelActiveWork()
@@ -639,6 +656,7 @@ final class PortMonitor: ObservableObject {
         scanToken = token
         activeScanIsManual = isManual
         isScanning = true
+        if !hasSnapshot { isInitialLoading = true }
         if selectedTarget.isRemote, hasSnapshot { isStale = true }
         scanTask = Task { [weak self] in
             let outcome = await scanner.scan(request)
@@ -654,24 +672,35 @@ final class PortMonitor: ObservableObject {
         scanToken = nil
         scanTask = nil
         isScanning = false
+        isInitialLoading = false
         if finishedManual && !pendingManualRefresh { isManualRefreshing = false }
         let matches = request.targetID == selectedTarget.id
             && request.sessionGeneration == sessionGeneration && isPresented && !quitRequested
-        var retryDelay: Duration = .seconds(2)
+        var retryDelay: Duration = Self.backoffDelay(for: 1)
         if matches {
             switch outcome {
             case let .success(targeted)
                 where targeted.targetID == request.targetID && targeted.sessionGeneration == request.sessionGeneration:
                 var state = targetStates[request.targetID] ?? .empty
+                let snapshotChanged = state.snapshot != targeted.snapshot
                 state.snapshot = targeted.snapshot
                 state.lastSuccess = .now
                 state.diagnostics = targeted.diagnostics
                 state.failure = nil
                 state.consecutiveFailures = 0
+                if snapshotChanged {
+                    state.consecutiveUnchangedSuccesses = 0
+                } else {
+                    state.consecutiveUnchangedSuccesses = min(state.consecutiveUnchangedSuccesses + 1, 3)
+                }
                 targetStates[request.targetID] = state
                 publishSelectedTargetState()
                 isStale = false
                 clearTerminationStatesForMissingRows(in: targeted.snapshot, targetID: request.targetID)
+                retryDelay = cadenceDelay(
+                    targetID: request.targetID,
+                    unchangedSuccesses: state.consecutiveUnchangedSuccesses
+                )
             case let .failure(targetID, session, error, diagnostics)
                 where targetID == request.targetID && session == request.sessionGeneration:
                 if !error.isCancellation {
@@ -682,7 +711,7 @@ final class PortMonitor: ObservableObject {
                     targetStates[request.targetID] = state
                     publishSelectedTargetState()
                     isStale = hasSnapshot
-                    if selectedTarget.isRemote { retryDelay = Self.backoffDelay(for: state.consecutiveFailures) }
+                    retryDelay = Self.backoffDelay(for: state.consecutiveFailures)
                 }
             case .success, .failure, .cancelled:
                 break
@@ -701,7 +730,26 @@ final class PortMonitor: ObservableObject {
     }
 
     static func backoffDelay(for failures: Int) -> Duration {
-        .seconds([2, 4, 8, 16, 30][min(max(failures - 1, 0), 4)])
+        RefreshCadencePolicy.failureDelay(for: failures)
+    }
+
+    private func resetCadenceState(for targetID: PortTargetID) {
+        guard var state = targetStates[targetID] else { return }
+        state.consecutiveUnchangedSuccesses = 0
+        targetStates[targetID] = state
+    }
+
+    private func cadenceDelay(
+        targetID: PortTargetID? = nil,
+        unchangedSuccesses: Int
+    ) -> Duration {
+        let targetID = targetID ?? selectedTarget.id
+        let target: RefreshTargetKind = targetID == .local ? .local : .remote
+        return cadencePolicy.delay(
+            target: target,
+            unchangedSuccesses: unchangedSuccesses,
+            powerMode: powerModeProvider.currentMode()
+        )
     }
 
     private func scheduleNext(after duration: Duration) {

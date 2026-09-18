@@ -535,7 +535,7 @@ final class PortMonitorTests: XCTestCase {
         XCTAssertNil(monitor.scanError)
     }
 
-    func testInjectedClockRefreshesAfterTwoSecondsAndStopsWhenClosed() async {
+    func testInjectedClockRefreshesWithAdaptiveCadenceAndStopsWhenClosed() async {
         let clock = ManualMonitorClock()
         let scanner = SequencedMonitorScanner(outcomes: [
             .success(snapshot: .empty, diagnostics: zeroDiagnostics),
@@ -557,6 +557,9 @@ final class PortMonitorTests: XCTestCase {
 
         await clock.advance()
         await waitUntil { await scanner.scanCount() == 2 }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let adaptiveDurations = await clock.requestedDurations()
+        XCTAssertEqual(adaptiveDurations, [.seconds(2), .seconds(5)])
 
         monitor.setPresented(false)
         let countWhenClosed = await scanner.scanCount()
@@ -564,6 +567,114 @@ final class PortMonitorTests: XCTestCase {
         try? await Task.sleep(for: .milliseconds(50))
         let countAfterClose = await scanner.scanCount()
         XCTAssertEqual(countAfterClose, countWhenClosed)
+        XCTAssertFalse(monitor.isScanning)
+    }
+
+    func testUnchangedLocalSnapshotsUseAdaptiveCadence() async {
+        let clock = ManualMonitorClock()
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics),
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock,
+            cadencePolicy: RefreshCadencePolicy(),
+            powerModeProvider: FixedMonitorPowerModeProvider(mode: .normal)
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let firstDurations = await clock.requestedDurations()
+        XCTAssertEqual(firstDurations, [.seconds(2)])
+
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let secondDurations = await clock.requestedDurations()
+        XCTAssertEqual(secondDurations, [.seconds(2), .seconds(5)])
+    }
+
+    func testLowPowerLocalCadenceStartsAtTenSeconds() async {
+        let clock = ManualMonitorClock()
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock,
+            cadencePolicy: RefreshCadencePolicy(),
+            powerModeProvider: FixedMonitorPowerModeProvider(mode: .lowPower)
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let durations = await clock.requestedDurations()
+        XCTAssertEqual(durations, [.seconds(10)])
+    }
+
+    func testChangedSnapshotResetsAdaptiveCadence() async {
+        let clock = ManualMonitorClock()
+        let changedSnapshot = PortSnapshot(listeners: [makeRow(pid: 7, port: 8080)], connections: [])
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .success(snapshot: .empty, diagnostics: zeroDiagnostics),
+            .success(snapshot: changedSnapshot, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock,
+            cadencePolicy: RefreshCadencePolicy(),
+            powerModeProvider: FixedMonitorPowerModeProvider(mode: .normal)
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let durations = await clock.requestedDurations()
+        XCTAssertEqual(durations, [.seconds(2), .seconds(2)])
+    }
+
+    func testLocalFailuresUseAdaptiveBackoff() async {
+        let clock = ManualMonitorClock()
+        let scanner = SequencedMonitorScanner(outcomes: [
+            .failure(error: .timedOut, diagnostics: zeroDiagnostics),
+            .failure(error: .timedOut, diagnostics: zeroDiagnostics)
+        ])
+        let monitor = PortMonitor(
+            scanner: scanner,
+            terminator: NoopTerminator(),
+            ownPID: 999,
+            clock: clock,
+            cadencePolicy: RefreshCadencePolicy(),
+            powerModeProvider: FixedMonitorPowerModeProvider(mode: .normal)
+        )
+        defer { monitor.setPresented(false) }
+
+        monitor.setPresented(true)
+        await waitUntil { await scanner.scanCount() == 1 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let firstDurations = await clock.requestedDurations()
+        XCTAssertEqual(firstDurations, [.seconds(2)])
+
+        await clock.advance()
+        await waitUntil { await scanner.scanCount() == 2 && !monitor.isScanning }
+        await waitUntil { await clock.waitingCount() == 1 }
+        let secondDurations = await clock.requestedDurations()
+        XCTAssertEqual(secondDurations, [.seconds(2), .seconds(4)])
     }
 
     func testClosingCancelsAnInFlightScanWithoutStartingAnother() async {
@@ -1358,6 +1469,12 @@ private actor ManualMonitorClock: MonitorSleeping {
         waiters.removeAll()
         pending.forEach { $0.resume(throwing: CancellationError()) }
     }
+}
+
+private struct FixedMonitorPowerModeProvider: MonitorPowerModeProviding, Sendable {
+    let mode: MonitorPowerMode
+
+    func currentMode() -> MonitorPowerMode { mode }
 }
 
 private struct CancellingClock: MonitorSleeping {
