@@ -142,11 +142,6 @@ final class PortMonitor: ObservableObject {
             isManualRefreshing = false
             forceKillPrompt = nil
             cancelRemoteWorkAndClearState()
-            if selectedTarget.isRemote {
-                selectedTarget = .local
-                activeScanner = localScanner
-                publishSelectedTargetState()
-            }
             scanTask?.cancel()
             let scanner = activeScanner
             Task { await scanner?.cancelActiveWork() }

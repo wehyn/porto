@@ -719,7 +719,7 @@ final class RemoteMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.listenerRows.first?.processName, "new")
     }
 
-    func testClosingPopoverReturnsToThisMacAndCancelsRemoteWork() async throws {
+    func testClosingPopoverPreservesSelectedTargetAndCancelsRemoteWork() async throws {
         let profile = profile(name: "Production", enabled: true)
         let store = InMemoryRemoteServerProfileStore()
         try store.save(profile)
@@ -734,7 +734,7 @@ final class RemoteMonitorTests: XCTestCase {
 
         monitor.setPresented(false)
 
-        XCTAssertEqual(monitor.selectedTarget, .local)
+        XCTAssertEqual(monitor.selectedTarget, .remote(profile))
         await waitUntil { await remote.cancellationCount() == 1 }
     }
 
@@ -762,7 +762,7 @@ final class RemoteMonitorTests: XCTestCase {
             let localCount = await local.count()
             let remoteCount = await remote.count()
             return !monitor.isScanning
-                && monitor.selectedTarget == .local
+                && monitor.selectedTarget == .remote(profile)
                 && (localCount == 2 || remoteCount == 2)
         }
         let localFollowUpTriggers = Array((await local.triggers()).dropFirst())
@@ -772,7 +772,7 @@ final class RemoteMonitorTests: XCTestCase {
             followUpTriggers.contains(.presentation),
             "The refresh queued during cancellation must retain the presentation trigger."
         )
-        XCTAssertEqual(monitor.selectedTarget, .local)
+        XCTAssertEqual(monitor.selectedTarget, .remote(profile))
         monitor.setPresented(false)
     }
 
