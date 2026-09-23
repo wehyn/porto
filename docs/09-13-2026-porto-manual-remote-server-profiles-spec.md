@@ -30,8 +30,10 @@ file picker.
 
 New profiles start disabled. Saving a profile never connects to it. Enabling a
 profile makes it available in Porto's target picker; selecting that enabled
-profile starts the remote scan. Porto always starts on This Mac and does not
-remember a remote target between launches.
+profile starts the remote scan. Porto always starts on This Mac at application
+launch, retains the selected target in memory across menu popover close and
+reopen while the process remains running, and does not remember a remote
+target between launches.
 
 The picker may read bounded, safe literal entries from `~/.ssh/config` and its
 Include files to propose candidates, but discovery never contacts a host or
@@ -76,9 +78,9 @@ action.
 22. As a Porto user, I want multiple remote profiles, so that I can manage all of my development and hosted servers in one place.
 23. As a Porto user, I want profiles listed alphabetically by display name, so that the Settings list and target picker remain predictable.
 24. As a Porto user, I want only one remote server selected at a time, so that Porto remains lightweight and does not create multiple concurrent remote scans.
-25. As a Porto user, I want Porto to retain the selected profile while the popover is open, so that normal refreshes continue inspecting the same server.
+25. As a Porto user, I want Porto to retain the selected profile while the popover is open and when it is reopened during the same app session, so that normal refreshes continue inspecting the same server.
 26. As a Porto user, I want closing the popover to stop remote refreshes, so that Porto does not keep polling remote servers while hidden.
-27. As a Porto user, I want reopening Porto to preserve This Mac as the application-start default, so that a later launch never begins with a remote connection.
+27. As a Porto user, I want launching Porto to preserve This Mac as the application-start default, so that a later launch never begins with a remote connection.
 28. As a Porto user, I want editing a selected profile to cancel the old scan and reconnect using the new values on the next refresh, so that stale connection details are not used.
 29. As a Porto user, I want disabling the selected profile to return Porto to This Mac and cancel remote work, so that an off profile is never contacted.
 30. As a Porto user, I want deleting the selected profile to return Porto to This Mac, so that no deleted server remains active.
@@ -163,9 +165,11 @@ action.
   profiles in alphabetical display-name order. Disabled profiles remain
   visible in Settings but are not selectable targets and cannot start scans.
 
-- The application starts with This Mac selected and does not persist the last
-  selected target. Saving, enabling, or editing a profile does not itself
-  select it or open an SSH connection.
+- The application starts with This Mac selected on every launch. While the
+  process remains running, Porto retains the selected enabled target in memory
+  across popover close and reopen, but does not persist that target choice to
+  disk. Saving, enabling, or editing a profile does not itself select it or
+  open an SSH connection.
 
 - Disabling or deleting the selected profile increments the active session,
   cancels the remote scanner, clears pending remote work, and switches to This
